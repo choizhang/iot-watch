@@ -27,6 +27,7 @@ export interface AlarmOrder {
   alarm_id: string
   device_imei: string
   alert_type: string
+  category: 'SOS' | 'FALL' | 'VITAL' | 'GEOFENCE'
   trigger_time: string
   latitude: number
   longitude: number
@@ -139,6 +140,7 @@ export const generateMockData = (): { devices: DeviceItem[]; alarms: AlarmOrder[
     alarm_id: 'ALARM-HK-20260727-001',
     device_imei: '868811000000015',
     alert_type: 'SOS 紧急手动求救',
+    category: 'SOS',
     trigger_time: '今天 10:25:30',
     latitude: 22.371234,
     longitude: 114.115678,
@@ -223,12 +225,19 @@ export const generateMockData = (): { devices: DeviceItem[]; alarms: AlarmOrder[
 
     // 如果是 SOS 设备，自动同步生成 1 条对应的实时 SOS 告警单
     if (status === 'sos_alert') {
-      const alertTypes = ['SOS 紧急按键求救', '摔倒姿态异常告警', '静息心率过高告警 (128bpm)', '越界离开社区生活圈']
+      const alertConfigs: { type: string; category: 'SOS' | 'FALL' | 'VITAL' | 'GEOFENCE' }[] = [
+        { type: 'SOS 紧急按键求救', category: 'SOS' },
+        { type: '摔倒姿态异常告警', category: 'FALL' },
+        { type: '静息心率过高告警 (128bpm)', category: 'VITAL' },
+        { type: '越界离开社区生活圈', category: 'GEOFENCE' }
+      ]
+      const cfg = alertConfigs[alarms.length % alertConfigs.length]
       alarms.push({
         id: alarms.length + 1,
         alarm_id: `ALARM-HK-20260727-${alarms.length + 1 < 10 ? '00' + (alarms.length + 1) : '0' + (alarms.length + 1)}`,
         device_imei: imei,
-        alert_type: alertTypes[alarms.length % alertTypes.length],
+        alert_type: cfg.type,
+        category: cfg.category,
         trigger_time: `今天 ${new Date((now - timeAgo) * 1000).toTimeString().split(' ')[0]}`,
         latitude: lat,
         longitude: lng,
@@ -263,6 +272,12 @@ export const useDashboardStore = defineStore('dashboard', {
     totalCount: (state) => state.devices.length,
     onlineRate: (state) => Math.round((state.devices.filter(d => d.status === 'online').length / (state.devices.length || 1)) * 100),
     unhandledAlarmsCount: (state) => state.alarmOrders.filter(a => a.status === 'UNHANDLED').length,
+    criticalAlarmsCount: (state) => state.alarmOrders.filter(a => a.category === 'SOS' || a.category === 'FALL').length,
+    warningAlarmsCount: (state) => state.alarmOrders.filter(a => a.category === 'VITAL' || a.category === 'GEOFENCE').length,
+    countSOS: (state) => state.alarmOrders.filter(a => a.category === 'SOS' || a.category === 'FALL').length,
+    countFALL: (state) => state.alarmOrders.filter(a => a.category === 'FALL').length,
+    countVITAL: (state) => state.alarmOrders.filter(a => a.category === 'VITAL').length,
+    countGEOFENCE: (state) => state.alarmOrders.filter(a => a.category === 'GEOFENCE').length,
     selectedDevice: (state) => state.devices.find(d => d.imei === state.selectedImei) || null,
   },
 
@@ -381,6 +396,7 @@ export const useDashboardStore = defineStore('dashboard', {
             alarm_id: 'ALARM-HK-20260727-001',
             device_imei: '868811000000015',
             alert_type: 'SOS 紧急求救',
+            category: 'SOS',
             trigger_time: '今天 10:25:30',
             latitude: 22.371234,
             longitude: 114.115678,

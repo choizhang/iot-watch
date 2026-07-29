@@ -27,6 +27,7 @@ import {
 
 const store = useDashboardStore()
 const filterStatus = ref<'all' | 'online' | 'sos_alert' | 'offline'>('all')
+const alarmCategoryFilter = ref<'all' | 'SOS' | 'FALL' | 'VITAL' | 'GEOFENCE'>('all')
 const searchQuery = ref('')
 const commandStatus = ref<'idle' | 'sending' | 'success' | 'error'>('idle')
 const commandMsg = ref('')
@@ -48,6 +49,13 @@ onUnmounted(() => {
 
 const handleStatusFilter = (status: 'all' | 'online' | 'sos_alert' | 'offline') => {
   filterStatus.value = status
+}
+
+const filteredAlarmOrders = () => {
+  return store.alarmOrders.filter(a => {
+    if (alarmCategoryFilter.value === 'all') return true
+    return a.category === alarmCategoryFilter.value
+  })
 }
 
 const sendFindCommand = async (imei: string) => {
@@ -175,14 +183,17 @@ const formatLocationStatus = (ts: number) => {
           </div>
           <div class="glass-panel-danger p-3.5 rounded-2xl flex flex-col justify-between border-red-500/40">
             <div class="flex items-center justify-between">
-              <span class="text-xs font-bold text-red-300">SOS 紧急告警</span>
+              <span class="text-xs font-bold text-red-300">紧急救援 (SOS/跌倒)</span>
               <ShieldAlert :size="16" class="text-red-400 animate-bounce" />
             </div>
-            <div class="text-2xl font-black text-red-400 mt-1 font-mono">{{ store.sosCount }} <span class="text-xs font-normal text-red-300">起</span></div>
+            <div class="text-2xl font-black text-red-400 mt-1 font-mono">{{ store.criticalAlarmsCount }} <span class="text-xs font-normal text-red-300">起</span></div>
           </div>
-          <div class="glass-panel p-3.5 rounded-2xl flex flex-col justify-between">
-            <span class="text-xs font-medium text-slate-400">离线失联设备</span>
-            <div class="text-2xl font-black text-slate-400 mt-1 font-mono">{{ store.offlineCount }} <span class="text-xs font-normal text-slate-500">台</span></div>
+          <div class="glass-panel p-3.5 rounded-2xl flex flex-col justify-between border-amber-500/30">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-amber-300">防护预警 (体征/围栏)</span>
+              <Activity :size="16" class="text-amber-400" />
+            </div>
+            <div class="text-2xl font-black text-amber-400 mt-1 font-mono">{{ store.warningAlarmsCount }} <span class="text-xs font-normal text-amber-300">起</span></div>
           </div>
         </div>
 
@@ -331,51 +342,100 @@ const formatLocationStatus = (ts: number) => {
         </div>
       </div>
 
-      <!-- ===== 右栏 (3 列): 实时 SOS 告警风暴与工单处理看板 ===== -->
+      <!-- ===== 右栏 (3 列): 告警中心与工单分流处理看板 (方案二：Filter Tab + 异色 Badge) ===== -->
       <div class="col-span-12 lg:col-span-3 flex flex-col space-y-4">
-        <div class="glass-panel-danger rounded-2xl p-4 flex-1 flex flex-col border-red-500/30">
-          <div class="flex items-center justify-between mb-3 border-b border-red-500/20 pb-3">
-            <h3 class="text-sm font-extrabold text-red-300 flex items-center space-x-2">
-              <Bell :size="18" class="text-red-400 animate-bounce" />
-              <span>实时 SOS 告警风暴</span>
+        <div class="glass-panel rounded-2xl p-4 flex-1 flex flex-col border-slate-800">
+          <!-- 告警中心 Header -->
+          <div class="flex items-center justify-between mb-3 border-b border-slate-800 pb-3">
+            <h3 class="text-sm font-extrabold text-slate-100 flex items-center space-x-2">
+              <Bell :size="18" class="text-cyan-400 animate-pulse" />
+              <span>实时告警控制中心</span>
             </h3>
-            <span class="text-xs px-2 py-0.5 rounded-full bg-red-600 text-white font-mono font-bold animate-pulse">
-              {{ store.alarmOrders.length }} 起待处理
+            <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-cyan-400 font-mono font-bold">
+              {{ store.alarmOrders.length }} 起记录
             </span>
           </div>
 
-          <!-- SOS 告警风暴列表 (渲染全量 SOS 设备告警单) -->
-          <div class="space-y-3 flex-1 overflow-y-auto max-h-[520px] pr-1">
+          <!-- 告警分类 Filter Tab 快捷切页 -->
+          <div class="flex items-center space-x-1 bg-slate-900 p-1 rounded-xl border border-slate-800 text-[10px] mb-3 overflow-x-auto">
+            <button 
+              @click="alarmCategoryFilter = 'all'" 
+              :class="['px-2 py-1 rounded-lg font-bold transition flex-shrink-0', alarmCategoryFilter === 'all' ? 'bg-cyan-600 text-white shadow' : 'text-slate-400 hover:text-white']"
+            >
+              全部({{ store.alarmOrders.length }})
+            </button>
+            <button 
+              @click="alarmCategoryFilter = 'SOS'" 
+              :class="['px-2 py-1 rounded-lg font-bold transition flex-shrink-0', alarmCategoryFilter === 'SOS' ? 'bg-red-600 text-white shadow' : 'text-red-400 hover:text-white']"
+            >
+              🆘 SOS({{ store.alarmOrders.filter(a => a.category === 'SOS').length }})
+            </button>
+            <button 
+              @click="alarmCategoryFilter = 'FALL'" 
+              :class="['px-2 py-1 rounded-lg font-bold transition flex-shrink-0', alarmCategoryFilter === 'FALL' ? 'bg-orange-600 text-white shadow' : 'text-orange-400 hover:text-white']"
+            >
+              🤸 跌倒({{ store.alarmOrders.filter(a => a.category === 'FALL').length }})
+            </button>
+            <button 
+              @click="alarmCategoryFilter = 'VITAL'" 
+              :class="['px-2 py-1 rounded-lg font-bold transition flex-shrink-0', alarmCategoryFilter === 'VITAL' ? 'bg-pink-600 text-white shadow' : 'text-pink-400 hover:text-white']"
+            >
+              ❤️ 体征({{ store.alarmOrders.filter(a => a.category === 'VITAL').length }})
+            </button>
+            <button 
+              @click="alarmCategoryFilter = 'GEOFENCE'" 
+              :class="['px-2 py-1 rounded-lg font-bold transition flex-shrink-0', alarmCategoryFilter === 'GEOFENCE' ? 'bg-cyan-700 text-white shadow' : 'text-cyan-400 hover:text-white']"
+            >
+              ⭕ 围栏({{ store.alarmOrders.filter(a => a.category === 'GEOFENCE').length }})
+            </button>
+          </div>
+
+          <!-- 告警单列表 (渲染异色 Badge 标签卡片) -->
+          <div class="space-y-3 flex-1 overflow-y-auto max-h-[500px] pr-1">
             <div 
-              v-for="alarm in store.alarmOrders" 
+              v-for="alarm in filteredAlarmOrders()" 
               :key="alarm.id"
-              class="bg-red-950/40 border border-red-500/40 rounded-xl p-3 space-y-2 hover:border-red-400 transition"
+              :class="['rounded-xl p-3 space-y-2 border transition',
+                alarm.category === 'SOS' ? 'bg-red-950/40 border-red-500/50 hover:border-red-400' :
+                alarm.category === 'FALL' ? 'bg-orange-950/40 border-orange-500/50 hover:border-orange-400' :
+                alarm.category === 'VITAL' ? 'bg-pink-950/30 border-pink-500/40 hover:border-pink-300' :
+                'bg-cyan-950/30 border-cyan-500/40 hover:border-cyan-300']"
             >
               <div class="flex items-center justify-between">
-                <span class="text-xs font-bold text-red-200 flex items-center space-x-1.5">
-                  <ShieldAlert :size="14" class="text-red-400" />
+                <span :class="['text-[11px] font-extrabold px-2 py-0.5 rounded-lg border flex items-center space-x-1 font-mono',
+                  alarm.category === 'SOS' ? 'bg-red-500/20 text-red-300 border-red-500/40 animate-pulse' :
+                  alarm.category === 'FALL' ? 'bg-orange-500/20 text-orange-300 border-orange-500/40' :
+                  alarm.category === 'VITAL' ? 'bg-pink-500/20 text-pink-300 border-pink-500/40' :
+                  'bg-cyan-500/20 text-cyan-300 border-cyan-500/40']"
+                >
+                  <ShieldAlert v-if="alarm.category === 'SOS' || alarm.category === 'FALL'" :size="12" />
+                  <Activity v-else :size="12" />
                   <span>{{ alarm.alert_type }}</span>
                 </span>
-                <span class="text-[10px] text-red-300/80 font-mono">{{ alarm.trigger_time }}</span>
+                <span class="text-[10px] text-slate-400 font-mono">{{ alarm.trigger_time }}</span>
               </div>
 
               <div class="text-xs text-slate-300 space-y-0.5 font-mono">
                 <div>长者设备: <span class="font-bold text-white">{{ store.devices.find(d => d.imei === alarm.device_imei)?.owner_name || alarm.device_imei }}</span></div>
-                <div>触发表体心率: <span class="text-red-400 font-bold">{{ alarm.heart_rate }} bpm</span></div>
+                <div>体征指标: <span :class="alarm.category === 'VITAL' || alarm.category === 'SOS' ? 'text-rose-400 font-bold' : 'text-slate-300'">{{ alarm.heart_rate }} bpm</span></div>
                 <div>告警坐标: <span class="text-slate-400">{{ alarm.latitude.toFixed(4) }}, {{ alarm.longitude.toFixed(4) }}</span></div>
               </div>
 
               <div class="pt-1 flex items-center space-x-2">
                 <button 
                   @click="store.selectDevice(alarm.device_imei)"
-                  class="flex-1 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-lg text-xs font-bold transition flex items-center justify-center space-x-1 shadow-lg shadow-red-600/30"
+                  :class="['flex-1 py-1.5 rounded-lg text-xs font-bold transition flex items-center justify-center space-x-1 shadow-lg',
+                    alarm.category === 'SOS' ? 'bg-red-600 hover:bg-red-500 text-white shadow-red-600/30' :
+                    alarm.category === 'FALL' ? 'bg-orange-600 hover:bg-orange-500 text-white shadow-orange-600/30' :
+                    alarm.category === 'VITAL' ? 'bg-pink-600 hover:bg-pink-500 text-white shadow-pink-600/30' :
+                    'bg-cyan-700 hover:bg-cyan-600 text-white shadow-cyan-700/30']"
                 >
                   <MapPin :size="12" />
                   <span>定位此设备</span>
                 </button>
                 <RouterLink 
                   :to="'/device/' + alarm.device_imei"
-                  class="py-1.5 px-2 bg-slate-900 hover:bg-slate-800 text-red-300 border border-red-500/30 rounded-lg text-xs font-bold transition flex items-center justify-center"
+                  class="py-1.5 px-2 bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 rounded-lg text-xs font-bold transition flex items-center justify-center"
                 >
                   <span>处理工单</span>
                 </RouterLink>
