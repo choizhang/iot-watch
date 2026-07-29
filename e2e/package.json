@@ -1,0 +1,15 @@
+{
+  "name": "iot-e2e-tests",
+  "version": "1.0.0",
+  "description": "IoT 智慧养老系统 E2E 全链路闭环测试 (设备发包 → 后端处理 → Playwright UI 断言)",
+  "scripts": {
+    "test": "npx playwright test",
+    "test:headed": "npx playwright test --headed",
+    "test:ui": "npx playwright test --ui",
+    "report": "npx playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1",
+    "typescript": "^5.8.0"
+  }
+}
