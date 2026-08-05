@@ -154,6 +154,9 @@ func registerRoutes(router *gin.Engine, deviceHandler *handlers.DeviceHandler) {
 			// EMQX Webhook 接收端点
 			device.POST("/raw-tcp", deviceHandler.HandleRawTCP)
 
+			// 前端配置分发接口（必须在 /:imei 之前注册，否则 Gin 路由冲突）
+			device.GET("/config/maps-key", deviceHandler.HandleGetMapsKey)
+
 			// 查询设备状态
 			device.GET("/:imei/state", deviceHandler.HandleGetDeviceState)
 
@@ -197,7 +200,6 @@ func registerRoutes(router *gin.Engine, deviceHandler *handlers.DeviceHandler) {
 			device.GET("/:imei/trajectory", deviceHandler.HandleGetDeviceTrajectory)
 			device.GET("/:imei/vitals/history", deviceHandler.HandleGetDeviceVitalsHistory)
 			device.GET("/:imei/heatmap", deviceHandler.HandleGetDeviceHeatmap)
-			device.GET("/config/maps-key", deviceHandler.HandleGetMapsKey)
 		}
 	}
 }
