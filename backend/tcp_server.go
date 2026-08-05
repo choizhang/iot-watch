@@ -385,15 +385,6 @@ func (s *TCPServer) processPayload(conn net.Conn, clientAddr string, payload str
 	if parsedData.AckResponse != "" {
 		conn.Write([]byte(parsedData.AckResponse))
 		log.Printf("[TCP ACK SENT] [%s] 发送响应应答包: %s", clientAddr, parsedData.AckResponse)
-
-		// 若手环未锁定 GPS，下发 GPS 唤醒与定位频度设置指令
-		if parsedData.Latitude == 0 && (parsedData.EventType == "VER" || parsedData.EventType == "LK" || parsedData.EventType == "WEATHER" || parsedData.EventType == "UD") {
-			cmdGpsOn := fmt.Sprintf("[CS*%s*0006*GPSON,1]", parsedData.IMEI)
-			cmdUpload := fmt.Sprintf("[CS*%s*000A*UPLOAD,30]", parsedData.IMEI)
-			conn.Write([]byte(cmdGpsOn))
-			conn.Write([]byte(cmdUpload))
-			log.Printf("[TCP CMD DOWN] [%s] 主动下发 GPSON 唤醒指令: %s, %s", clientAddr, cmdGpsOn, cmdUpload)
-		}
 	} else {
 		conn.Write([]byte("OK\n"))
 	}
