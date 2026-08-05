@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, computed } from 'vue'
 import { useDeviceStore } from '../store/device'
 import AmapContainer from '../components/AmapContainer.vue'
 import { 
@@ -33,12 +33,12 @@ const resolvedAddress = ref('')
 const showImeiSwitcher = ref(false)
 const customImei = ref('')
 const availableImeis = ref([
+  '351086239665254',
+  '359000000000017',
   '1234567890',
   '13800138000',
   '867123456789012',
-  '359000000000017',
   '868811000000015',
-  '352099001761481',
 ])
 
 const switchImei = (imei: string) => {
@@ -83,6 +83,15 @@ const formatTime = (ts: number | string) => {
   
   return `${y}-${m}-${d} ${h}:${min}:${s}`
 }
+
+const displayAddress = computed(() => {
+  let addr = resolvedAddress.value || store.status?.address || ''
+  if (!addr) {
+    return store.status?.last_latitude ? `中国四川省成都市双流区` : '正在获取位置...'
+  }
+  // 正则过滤开头的 Plus Code (如 G4G3+86 或 G4F4+C86)
+  return addr.replace(/^[A-Z0-9]{4,8}\+[A-Z0-9]{2,4}\s*/, '')
+})
 </script>
 
 <template>
@@ -159,6 +168,8 @@ const formatTime = (ts: number | string) => {
           <AmapContainer 
             :latitude="store.status?.last_latitude" 
             :longitude="store.status?.last_longitude"
+            :status="store.status?.status"
+            :accuracy="store.status?.accuracy"
             @address-resolved="onAddressResolved"
           />
         </div>
@@ -168,13 +179,13 @@ const formatTime = (ts: number | string) => {
           <div class="flex justify-between items-start mb-6">
             <div class="flex-1 pr-4">
               <h3 class="font-bold text-slate-800 text-base leading-snug mb-2" data-testid="address-display">
-                {{ resolvedAddress || store.status?.address || (store.status?.last_latitude ? `香港特别行政区 (${store.status.last_latitude.toFixed(4)}, ${store.status.last_longitude.toFixed(4)})` : '正在获取位置...') }}
+                {{ displayAddress }}
               </h3>
-              <div class="flex items-center space-x-3 text-xs text-slate-400">
-                <span class="bg-blue-50 text-blue-500 px-2 py-0.5 rounded-lg uppercase font-bold tracking-tight">{{ store.status?.location_type || 'GPS' }}</span>
-                <div class="flex items-center space-x-1.5">
+              <div class="flex items-center space-x-2.5 text-xs text-slate-400">
+                <span class="bg-blue-50 text-blue-500 px-2 py-0.5 rounded-lg uppercase font-bold tracking-tight">{{ store.status?.location_type || store.status?.last_location_type || 'WIFI' }}</span>
+                <div class="flex items-center space-x-1">
                   <Clock :size="12" />
-                  <span>更新: {{ formatTime(store.status?.updated_at || '') }}</span>
+                  <span>{{ formatTime(store.status?.updated_at || '') }}</span>
                 </div>
               </div>
             </div>

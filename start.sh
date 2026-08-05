@@ -25,8 +25,8 @@ sleep 8
 # 2. 启动 Go 后端服务
 echo "[2/4] 正在后台启动 Go 后端服务..."
 cd backend
-go mod tidy
-go run . > ../.logs/backend.log 2>&1 &
+go build -o elder-guard-iot .
+nohup ./elder-guard-iot > ../.logs/backend.log 2>&1 &
 BACKEND_PID=$!
 echo $BACKEND_PID > ../.logs/.backend.pid
 cd ..

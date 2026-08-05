@@ -30,6 +30,13 @@ type Device struct {
 	LastHeartRate int `json:"last_heart_rate"`
 	// Battery 电量
 	Battery int `json:"battery"`
+	// Health metrics
+	BloodPressure string `gorm:"size:20" json:"bp"`
+	SpO2          int    `gorm:"column:spo2" json:"spo2"`
+	HRV           int    `json:"hrv"`
+	Steps         int    `json:"steps"`
+	// Accuracy 第三方定位 API 真实解算返回的精度米数
+	Accuracy float64 `gorm:"default:18.5" json:"accuracy"`
 	// CreatedAt 创建时间
 	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt 更新时间
@@ -49,6 +56,8 @@ type DeviceEvent struct {
 	IMEI string `gorm:"index;size:20;not null" json:"imei"`
 	// EventType 事件类型：heartbeat/location/sos/fall/heart_rate
 	EventType string `gorm:"size:20;not null" json:"event_type"`
+	// LocationType 定位方式：GPS/WIFI/LBS
+	LocationType string `gorm:"size:20;default:GPS" json:"location_type"`
 	// Latitude 纬度
 	Latitude float64 `json:"latitude"`
 	// Longitude 经度
@@ -57,6 +66,11 @@ type DeviceEvent struct {
 	HeartRate int `json:"heart_rate"`
 	// Battery 电量
 	Battery int `json:"battery"`
+	// Health metrics
+	BloodPressure string `gorm:"size:20" json:"bp"`
+	SpO2          int    `gorm:"column:spo2" json:"spo2"`
+	HRV           int    `json:"hrv"`
+	Steps         int    `json:"steps"`
 	// RawPayload 原始报文
 	RawPayload string `gorm:"type:text" json:"raw_payload"`
 	// EventTime 事件发生时间

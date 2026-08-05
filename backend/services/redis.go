@@ -69,13 +69,22 @@ func (r *RedisService) SetDeviceState(state *models.DeviceState) error {
 
 	// 同时写入 Hash 格式 (device:status:{imei}) 供 API 和 WebSocket 统一读取
 	hashData := map[string]interface{}{
-		"status":     state.Status,
-		"event_type": state.MsgType,
-		"lat":        fmt.Sprintf("%.6f", state.Latitude),
-		"lon":        fmt.Sprintf("%.6f", state.Longitude),
-		"heart_rate": state.HeartRate,
-		"battery":    state.Battery,
-		"updated_at": time.Now().Unix(),
+		"status":           state.Status,
+		"event_type":       state.MsgType,
+		"lat":              fmt.Sprintf("%.6f", state.Latitude),
+		"lon":              fmt.Sprintf("%.6f", state.Longitude),
+		"heart_rate":       state.HeartRate,
+		"battery":          state.Battery,
+		"bp":               state.BloodPressure,
+		"spo2":             state.SpO2,
+		"hrv":              state.HRV,
+		"steps":            state.Steps,
+		"hr_updated_at":    state.HRUpdatedAt,
+		"bp_updated_at":    state.BPUpdatedAt,
+		"spo2_updated_at":  state.SpO2UpdatedAt,
+		"hrv_updated_at":   state.HRVUpdatedAt,
+		"steps_updated_at": state.StepsUpdatedAt,
+		"updated_at":       time.Now().Unix(),
 	}
 	r.client.HMSet(r.ctx, keyStatus, hashData)
 	r.client.Expire(r.ctx, keyStatus, ttl)
@@ -103,12 +112,22 @@ func (r *RedisService) GetDeviceState(imei string) (*models.DeviceState, error) 
 		// 如果 Hash 有数据，解析 Hash
 		if len(hashData) > 0 {
 			state := &models.DeviceState{
-				IMEI:      imei,
-				MsgType:   hashData["event_type"],
-				HeartRate: parseIntSafe(hashData["heart_rate"]),
-				Battery:   parseIntSafe(hashData["battery"]),
-				Latitude:  parseFloatSafe(hashData["lat"]),
-				Longitude: parseFloatSafe(hashData["lon"]),
+				IMEI:           imei,
+				MsgType:        hashData["event_type"],
+				HeartRate:      parseIntSafe(hashData["heart_rate"]),
+				Battery:        parseIntSafe(hashData["battery"]),
+				Latitude:       parseFloatSafe(hashData["lat"]),
+				Longitude:      parseFloatSafe(hashData["lon"]),
+				BloodPressure:  hashData["bp"],
+				SpO2:           parseIntSafe(hashData["spo2"]),
+				HRV:            parseIntSafe(hashData["hrv"]),
+				Steps:          parseIntSafe(hashData["steps"]),
+				HRUpdatedAt:    parseInt64Safe(hashData["hr_updated_at"]),
+				BPUpdatedAt:    parseInt64Safe(hashData["bp_updated_at"]),
+				SpO2UpdatedAt:  parseInt64Safe(hashData["spo2_updated_at"]),
+				HRVUpdatedAt:   parseInt64Safe(hashData["hrv_updated_at"]),
+				FixMode:        hashData["event_type"],
+				StepsUpdatedAt: parseInt64Safe(hashData["steps_updated_at"]),
 			}
 
 			// 解析状态
@@ -251,4 +270,12 @@ func (r *RedisService) Close() error {
 // GetClient 获取原生 redis.Client 客户端（供其他模块使用）
 func (r *RedisService) GetClient() *redis.Client {
 	return r.client
+}
+
+func parseInt64Safe(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	v, _ := strconv.ParseInt(s, 10, 64)
+	return v
 }

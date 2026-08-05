@@ -66,6 +66,15 @@ func main() {
 	offlineDetector := services.NewOfflineDetector(mysqlSvc, redisSvc, 1*time.Minute, 5*time.Minute)
 	offlineDetector.Start(context.Background())
 
+	// 8. 启动定时 MySQL 历史数据清理归档服务 (每 12 小时自动清理 30 天前的常规高频事件)
+	go func() {
+		ticker := time.NewTicker(12 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			mysqlSvc.CleanOldDeviceEvents(30)
+		}
+	}()
+
 	// 8. 创建 Gin 路由器
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
@@ -137,6 +146,9 @@ func registerRoutes(router *gin.Engine, deviceHandler *handlers.DeviceHandler) {
 	// API v1 路由组
 	v1 := router.Group("/api/v1")
 	{
+		// 获取全网所有活跃及真实注册设备列表
+		v1.GET("/devices", deviceHandler.HandleGetDevices)
+
 		device := v1.Group("/device")
 		{
 			// EMQX Webhook 接收端点
@@ -179,6 +191,12 @@ func registerRoutes(router *gin.Engine, deviceHandler *handlers.DeviceHandler) {
 			device.POST("/:imei/geofences", deviceHandler.HandleAddGeofence)
 			device.DELETE("/:imei/geofences/:id", deviceHandler.HandleDeleteGeofence)
 			device.PUT("/:imei/geofences/:id/toggle", deviceHandler.HandleToggleGeofence)
+
+			// 详情页历史与分析接口
+			device.GET("/:imei/alarms", deviceHandler.HandleGetDeviceAlarms)
+			device.GET("/:imei/trajectory", deviceHandler.HandleGetDeviceTrajectory)
+			device.GET("/:imei/vitals/history", deviceHandler.HandleGetDeviceVitalsHistory)
+			device.GET("/:imei/heatmap", deviceHandler.HandleGetDeviceHeatmap)
 		}
 	}
 }

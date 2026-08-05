@@ -1,5 +1,6 @@
+/*
+// 高德地图 JS API 密钥与配置（暂时注释）
 import AMapLoader from '@amap/amap-jsapi-loader'
-
 const AMAP_KEY = '51f8039ddd81720e5acd9cf08f4da659'
 const AMAP_SECURITY_CODE = '1bc91108fb1a45315f635b3671d2ffca'
 
@@ -8,28 +9,55 @@ if (typeof window !== 'undefined') {
     securityJsCode: AMAP_SECURITY_CODE,
   }
 }
+*/
 
-let amapPromise: Promise<any> | null = null
+// 谷歌地图 (Google Maps JS API) 配置密钥
+export const GOOGLE_MAPS_KEY = 'AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw'
 
-// 单例高德 JS API 预加载与全局 Promise 缓存 (全局仅初始化加载一次)
-export const getAMapInstance = (): Promise<any> => {
-  if (amapPromise) return amapPromise
+let googleMapsPromise: Promise<any> | null = null
 
-  amapPromise = AMapLoader.load({
-    key: AMAP_KEY,
-    version: '2.0',
-    plugins: [
-      'AMap.Geocoder', 
-      'AMap.Marker', 
-      'AMap.Pixel', 
-      'AMap.Polyline', 
-      'AMap.HeatMap', 
-      'AMap.TileLayer'
-    ],
-  }).catch((err) => {
-    amapPromise = null // 失败重置，允许重试
-    throw err
+// 单例 Google Maps API 预加载与缓存
+export const getGoogleMapsInstance = (): Promise<any> => {
+  if (typeof window === 'undefined') return Promise.reject('window undefined')
+  if ((window as any).google && (window as any).google.maps) {
+    return Promise.resolve((window as any).google.maps)
+  }
+  if (googleMapsPromise) return googleMapsPromise
+
+  googleMapsPromise = new Promise((resolve, reject) => {
+    const scriptId = 'google-maps-js-sdk'
+    if (document.getElementById(scriptId)) {
+      const checkInterval = setInterval(() => {
+        if ((window as any).google && (window as any).google.maps) {
+          clearInterval(checkInterval)
+          resolve((window as any).google.maps)
+        }
+      }, 100)
+      return
+    }
+
+    const script = document.createElement('script')
+    script.id = scriptId
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_KEY}&libraries=places,visualization&language=zh-CN`
+    script.async = true
+    script.defer = true
+    script.onload = () => {
+      if ((window as any).google && (window as any).google.maps) {
+        resolve((window as any).google.maps)
+      } else {
+        reject(new Error('Google Maps SDK 加载失败'))
+      }
+    }
+    script.onerror = (err) => {
+      googleMapsPromise = null
+      reject(err)
+    }
+    document.head.appendChild(script)
   })
 
-  return amapPromise
+  return googleMapsPromise
 }
+
+// 别名方法，确保兼容调用的地方
+export const getAMapInstance = getGoogleMapsInstance
+

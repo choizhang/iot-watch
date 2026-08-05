@@ -24,6 +24,20 @@ type DeviceState struct {
 	LastUpdate time.Time `json:"last_update"`
 	// MsgType 最新消息类型
 	MsgType string `json:"msg_type"`
+	// Accuracy 动态解算精度 (来自第三方 API 真实返回)
+	Accuracy float64 `json:"accuracy"`
+	// FixMode 定位方式
+	FixMode string `json:"fix_mode"`
+	// Health metrics & independent timestamps
+	BloodPressure string `json:"bp"`
+	SpO2          int    `json:"spo2"`
+	HRV           int    `json:"hrv"`
+	Steps         int    `json:"steps"`
+	HRUpdatedAt    int64  `json:"hr_updated_at"`
+	BPUpdatedAt    int64  `json:"bp_updated_at"`
+	SpO2UpdatedAt  int64  `json:"spo2_updated_at"`
+	HRVUpdatedAt   int64  `json:"hrv_updated_at"`
+	StepsUpdatedAt int64  `json:"steps_updated_at"`
 }
 
 // RedisKeyDeviceState 获取设备状态 Key

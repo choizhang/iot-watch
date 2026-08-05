@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import axios from 'axios'
-import { useDashboardStore, type DeviceItem } from '../store/dashboard'
+import { useDashboardStore } from '../store/dashboard'
 import AmapDashboard from '../components/AmapDashboard.vue'
 import { 
   ArrowLeft, 
@@ -10,68 +9,42 @@ import {
   Heart, 
   Activity, 
   Battery, 
-  Clock, 
-  Phone, 
   MapPin, 
   ShieldAlert, 
   User, 
-  Settings, 
-  CheckCircle2, 
-  RefreshCw,
   Zap,
-  Sliders,
   Flame,
   Navigation,
-  Calendar,
-  Satellite,
-  Radio,
-  Target,
-  Signal,
-  Play,
-  Pause,
-  FastForward,
-  Filter,
   Shield,
-  Layers,
   FileText,
   AlertTriangle,
-  Printer,
   X,
   TrendingUp,
-  Award
+  Pause,
+  Play
 } from 'lucide-vue-next'
 
-import AMapLoader from '@amap/amap-jsapi-loader'
-
-const AMAP_KEY = '51f8039ddd81720e5acd9cf08f4da659'
-const AMAP_SECURITY_CODE = '1bc91108fb1a45315f635b3671d2ffca'
-
-if (typeof window !== 'undefined') {
-  ;(window as any)._AMapSecurityConfig = {
-    securityJsCode: AMAP_SECURITY_CODE,
-  }
-}
-
-export interface GeofenceItem {
-  id: number
-  imei: string
-  name: string
-  latitude: number
-  longitude: number
-  radius: number
-  fence_type: string
-  enabled: boolean
-}
-
-export interface TrajectoryPoint {
-  id: number
-  time: string
-  locationName: string
-  address: string
-  lng: number
-  lat: number
-  speed: string
-}
+import { getGoogleMapsInstance } from '../utils/amap'
+import { 
+  fetchDeviceStatus, 
+  fetchGeofences, 
+  fetchAlarms, 
+  fetchVitalsHistory, 
+  fetchTrajectory, 
+  fetchHeatmap, 
+  type GeofenceItem, 
+  type TrajectoryPoint, 
+  type AlarmItem, 
+  type LandmarkItem 
+} from '../api/deviceApi'
+import { 
+  getMockDeviceStatus, 
+  getMockGeofences, 
+  getMockAlarms, 
+  getMockVitalsHistory, 
+  getMockTrajectory, 
+  getMockHeatmap 
+} from '../mock/deviceMock'
 
 const route = useRoute()
 const router = useRouter()
@@ -82,10 +55,10 @@ const imei = computed(() => (route.params.imei as string) || store.selectedImei)
 // 3 大核心解耦 Tab 视图切换
 const activeTab = ref<'realtime' | 'trajectory' | 'heatmap'>('realtime')
 
-// 解法 2: 多维体征趋势多切一卡片 (心率/血压/血氧/体温/计步)
-const selectedMetric = ref<'hr' | 'bp' | 'spo2' | 'temp' | 'steps'>('hr')
+// 多维体征趋势多切一卡片 (心率/血压/血氧/HRV/计步)
+const selectedMetric = ref<'hr' | 'bp' | 'spo2' | 'hrv' | 'steps'>('hr')
 
-// 解法 3: 全量健康研判报告大抽屉/弹窗状态
+// 全量健康研判报告大抽屉/弹窗状态
 const showFullReportModal = ref(false)
 
 // 轨迹 Tab 专属查询过滤与播放动画状态
@@ -103,153 +76,312 @@ const commandMsg = ref('')
 const commandStatus = ref<'idle' | 'sending' | 'success' | 'error'>('idle')
 const currentInterval = ref(300)
 const resolvedAddressText = ref('解析地理地址中...')
-const geofences = ref<GeofenceItem[]>([])
 
-const device = computed<DeviceItem>(() => {
+// ── 模块数据状态声明 ──────────────────────────────────────────────────────────
+const deviceData = ref<any>(null)
+const geofences = ref<GeofenceItem[]>([])
+const alarmList = ref<AlarmItem[]>([])
+const vitalsData = ref<{
+  hr: number[]
+  bpSys: number[]
+  bpDia: number[]
+  spo2: number[]
+  hrv: number[]
+  steps: number[]
+  hoursLabel: string[]
+  stepsHoursLabel: string[]
+}>({
+  hr: [],
+  bpSys: [],
+  bpDia: [],
+  spo2: [],
+  hrv: [],
+  steps: [],
+  hoursLabel: [],
+  stepsHoursLabel: []
+})
+const trajectoryPointsData = ref<TrajectoryPoint[]>([])
+const totalDistance = ref<number>(0)
+const avgSpeed = ref<number>(0)
+const heatmapDataPoints = ref<{ lng: number; lat: number; count: number }[]>([])
+const topLandmarks = ref<LandmarkItem[]>([])
+
+// ── 统一加载与模式切换服务 ──────────────────────────────────────────────────
+const loadDetailData = async () => {
+  if (!imei.value) return
+
+  if (store.mockMode) {
+    // 【全场景 Mock 模式】：从独立 deviceMock 服务抽取富演示数据
+    deviceData.value = getMockDeviceStatus(imei.value)
+    geofences.value = getMockGeofences(imei.value)
+    alarmList.value = getMockAlarms(imei.value)
+
+    const mockVitals = getMockVitalsHistory(imei.value)
+    vitalsData.value = {
+      hr: mockVitals.hr,
+      bpSys: mockVitals.bp_sys,
+      bpDia: mockVitals.bp_dia,
+      spo2: mockVitals.spo2,
+      hrv: mockVitals.hrv || mockVitals.temp || [],
+      steps: mockVitals.steps,
+      hoursLabel: mockVitals.hours_label || [],
+      stepsHoursLabel: mockVitals.steps_hours_label || mockVitals.hours_label || []
+    }
+
+    const mockTrack = getMockTrajectory(imei.value, trackTimeFilter.value)
+    trajectoryPointsData.value = mockTrack.points
+    totalDistance.value = mockTrack.total_distance
+    avgSpeed.value = mockTrack.avg_speed
+
+    const mockHeat = getMockHeatmap(imei.value, heatmapTimeFilter.value)
+    heatmapDataPoints.value = mockHeat.points
+    topLandmarks.value = mockHeat.landmarks
+  } else {
+    // 【真实 TCP 直连模式】：全量调用 deviceApi 请求服务端 API
+    const statusRes = await fetchDeviceStatus(imei.value)
+    deviceData.value = statusRes
+
+    geofences.value = await fetchGeofences(imei.value)
+    alarmList.value = await fetchAlarms(imei.value)
+
+    const vitalsRes = await fetchVitalsHistory(imei.value)
+    vitalsData.value = {
+      hr: vitalsRes.hr || [],
+      bpSys: vitalsRes.bp_sys || [],
+      bpDia: vitalsRes.bp_dia || [],
+      spo2: vitalsRes.spo2 || [],
+      hrv: vitalsRes.hrv || vitalsRes.temp || [],
+      steps: vitalsRes.steps || [],
+      hoursLabel: vitalsRes.hours_label || [],
+      stepsHoursLabel: vitalsRes.steps_hours_label || vitalsRes.hours_label || []
+    }
+
+    const trackRes = await fetchTrajectory(imei.value, trackTimeFilter.value)
+    trajectoryPointsData.value = trackRes.points || []
+    totalDistance.value = trackRes.total_distance || 0
+    avgSpeed.value = trackRes.avg_speed || 0
+
+    const heatRes = await fetchHeatmap(imei.value, heatmapTimeFilter.value)
+    heatmapDataPoints.value = heatRes.points || []
+    topLandmarks.value = heatRes.landmarks || []
+  }
+}
+
+// 设备基础信息 Computed
+const device = computed(() => {
+  if (deviceData.value) return deviceData.value
   const found = store.devices.find(d => d.imei === imei.value)
   if (found) return found
   return {
-    imei: imei.value,
-    owner_name: '长者设备 #' + imei.value.slice(-4),
-    owner_phone: '13800138000',
-    status: 'online',
-    battery: 88,
-    last_heart_rate: 76,
-    last_latitude: 22.396428,
-    last_longitude: 114.109497,
-    address: '香港特别行政区荃湾区合福工业大厦5楼502',
-    updated_at: Math.floor(Date.now() / 1000),
-    fix_mode: 'GPS',
-    satellites: 12,
-    accuracy: 5,
-    rssi: -72,
-    bp: '120/78',
-    spo2: 99,
-    temperature: 36.6,
-    steps: 6420
+    imei: imei.value || '',
+    owner_name: imei.value ? `未注册设备 #${imei.value.slice(-4)}` : '未知设备',
+    owner_phone: '--',
+    status: 'offline' as const,
+    battery: 0,
+    last_heart_rate: 0,
+    last_latitude: 0,
+    last_longitude: 0,
+    address: '暂无数据',
+    updated_at: 0,
+    fix_mode: 'GPS' as const,
+    satellites: 0,
+    accuracy: 0,
+    rssi: 0,
+    bp: '--',
+    spo2: 0,
+    temperature: 0,
+    steps: 0
   }
 })
 
-// 解法 1: 综合健康风险评分计算 (AI 智能判定)
+// 智能健康风险评分计算
 const healthRiskScore = computed(() => {
-  if (device.value.status === 'sos_alert') return 45
-  if (device.value.battery < 20 || device.value.last_heart_rate > 100) return 68
+  if (device.value.status === 'sos_alert' || alarmList.value.some(a => a.status === 'UNHANDLED')) return 45
+  if (device.value.battery < 20 || (device.value.last_heart_rate && device.value.last_heart_rate > 100)) return 68
+  if (!device.value.last_heart_rate && vitalsData.value.hr.length === 0) return 90
   return 88
 })
 
-// 24 小时各体征指标模拟数组
-const hr24Series = [72, 70, 68, 65, 66, 75, 82, 88, 76, 74, 78, 85, 92, 76, 75, 73, 72, 78, 118, 80, 76, 74, 72, 75]
-const bpSysSeries = [122, 120, 118, 115, 116, 125, 130, 135, 126, 124, 128, 132, 142, 126, 125, 123, 122, 128, 148, 130, 126, 124, 122, 125]
-const bpDiaSeries = [78, 76, 75, 72, 74, 80, 84, 86, 80, 78, 82, 85, 92, 80, 78, 76, 75, 80, 95, 82, 78, 76, 75, 78]
-const spo2Series = [99, 99, 98, 98, 99, 99, 98, 97, 99, 99, 98, 99, 96, 99, 99, 98, 99, 98, 94, 98, 99, 99, 98, 99]
-const tempSeries = [36.5, 36.5, 36.4, 36.4, 36.5, 36.6, 36.7, 36.8, 36.6, 36.5, 36.7, 36.8, 37.1, 36.6, 36.5, 36.5, 36.4, 36.6, 37.3, 36.7, 36.6, 36.5, 36.4, 36.6]
-const stepsSeries = [0, 0, 0, 0, 0, 0, 120, 450, 890, 620, 750, 910, 1200, 680, 320, 450, 560, 780, 320, 120, 50, 0, 0, 0]
+// 24小时体征趋势时间点线图计算
+const chartMetricInfo = computed(() => {
+  let rawValues: number[] = []
+  let unit = ''
+  let label = ''
+  let strokeColor = '#f43f5e'
+  let minVal = 40
+  let maxVal = 140
+  let lowerThreshold = 60
+  let upperThreshold = 100
 
-// 详细地理位置名称轨迹节点库 (修复 "节点" 占位问题)
-const trajectoryPointsData = computed<TrajectoryPoint[]>(() => {
-  const baseLng = device.value.last_longitude || 114.109497
-  const baseLat = device.value.last_latitude || 22.396428
-  return [
-    {
-      id: 1,
-      time: '08:15:30',
-      locationName: '荃湾合福工业大厦 (起始离开点)',
-      address: '香港特别行政区荃湾区合福工业大厦5楼',
-      lng: baseLng - 0.0150,
-      lat: baseLat - 0.0100,
-      speed: '0.0 km/h'
-    },
-    {
-      id: 2,
-      time: '09:05:12',
-      locationName: '沙咀道与关门口街路口',
-      address: '香港特别行政区荃湾区沙咀道288号',
-      lng: baseLng - 0.0120,
-      lat: baseLat - 0.0080,
-      speed: '2.8 km/h'
-    },
-    {
-      id: 3,
-      time: '09:40:25',
-      locationName: '荃湾街市街社区长者中心',
-      address: '香港特别行政区荃湾区街市街55号',
-      lng: baseLng - 0.0090,
-      lat: baseLat - 0.0060,
-      speed: '1.2 km/h'
-    },
-    {
-      id: 4,
-      time: '10:25:00',
-      locationName: '荃湾海滨公园广场 (SOS求救点)',
-      address: '香港特别行政区荃湾区海滨公园步道',
-      lng: baseLng - 0.0060,
-      lat: baseLat - 0.0030,
-      speed: '0.5 km/h'
-    },
-    {
-      id: 5,
-      time: '11:10:45',
-      locationName: '杨屋道综合大楼',
-      address: '香港特别行政区荃湾区杨屋道45号',
-      lng: baseLng - 0.0030,
-      lat: baseLat - 0.0015,
-      speed: '3.1 km/h'
-    },
-    {
-      id: 6,
-      time: '12:00:00',
-      locationName: '荃湾社区医疗护理中心 (当前驻留)',
-      address: '香港特别行政区荃湾区仁济街7-11号',
-      lng: baseLng,
-      lat: baseLat,
-      speed: '0.0 km/h'
+  if (selectedMetric.value === 'hr') {
+    rawValues = vitalsData.value.hr || []
+    unit = 'bpm'
+    label = '心率'
+    strokeColor = '#f43f5e'
+    minVal = 40
+    maxVal = 140
+    lowerThreshold = 60
+    upperThreshold = 100
+  } else if (selectedMetric.value === 'bp') {
+    rawValues = vitalsData.value.bpSys || []
+    unit = 'mmHg'
+    label = '收缩压'
+    strokeColor = '#3b82f6'
+    minVal = 60
+    maxVal = 160
+    lowerThreshold = 90
+    upperThreshold = 140
+  } else if (selectedMetric.value === 'spo2') {
+    rawValues = vitalsData.value.spo2 || []
+    unit = '%'
+    label = '血氧'
+    strokeColor = '#06b6d4'
+    minVal = 85
+    maxVal = 100
+    lowerThreshold = 95
+    upperThreshold = 99
+  } else if (selectedMetric.value === 'hrv') {
+    rawValues = vitalsData.value.hrv || []
+    unit = 'ms'
+    label = '心率变异性(HRV)'
+    strokeColor = '#10b981'
+    minVal = 0
+    maxVal = 120
+    lowerThreshold = 30
+    upperThreshold = 100
+  } else if (selectedMetric.value === 'steps') {
+    rawValues = vitalsData.value.steps || []
+    unit = '步'
+    label = '计步'
+    strokeColor = '#6366f1'
+    const maxInArr = Math.max(...(rawValues.length ? rawValues : [0]), 1000)
+    minVal = 0
+    maxVal = maxInArr * 1.15
+    lowerThreshold = 3000
+    upperThreshold = 8000
+  }
+
+  const validRawValues = rawValues.filter(v => v > 0)
+  if (!rawValues || rawValues.length === 0 || validRawValues.length === 0) {
+    return { 
+      points: [], 
+      validPoints: [], 
+      polylineStr: '', 
+      areaStr: '', 
+      strokeColor, 
+      unit, 
+      label, 
+      rawValues: [],
+      padLeft: 45,
+      padRight: 20,
+      lowerThreshold,
+      upperThreshold,
+      upperY: 0,
+      lowerY: 0,
+      yTicks: []
     }
-  ]
+  }
+
+  const width = 560
+  const height = 110
+  const padLeft = 45
+  const padRight = 20
+  const padY = 15
+
+  const computedMin = Math.min(...validRawValues)
+  const computedMax = Math.max(...validRawValues)
+  const actualMin = Math.min(minVal, computedMin)
+  const actualMax = Math.max(maxVal, computedMax)
+  const range = actualMax - actualMin || 1
+
+  const getSecondsInDay = (label: string): number => {
+    if (!label) return 0
+    const parts = label.split(':')
+    if (parts.length >= 2) {
+      const h = parseInt(parts[0], 10) || 0
+      const m = parseInt(parts[1], 10) || 0
+      const s = parseInt(parts[2] || '0', 10) || 0
+      return h * 3600 + m * 60 + s
+    }
+    return 0
+  }
+
+  const points = rawValues.map((v, i) => {
+    let x = padLeft + (i / Math.max(1, rawValues.length - 1)) * (width - padLeft - padRight)
+    let timeLabel = vitalsData.value.hoursLabel?.[i] || `${i}:00`
+
+    if (selectedMetric.value === 'steps') {
+      timeLabel = vitalsData.value.stepsHoursLabel?.[i] || vitalsData.value.hoursLabel?.[i] || `${i}:00`
+      const secs = getSecondsInDay(timeLabel)
+      const ratio = Math.max(0, Math.min(1, secs / 86400))
+      x = padLeft + ratio * (width - padLeft - padRight)
+    }
+
+    const y = v > 0 ? height - padY - ((v - actualMin) / range) * (height - 2 * padY) : height - padY
+    return { x, y, value: v, timeLabel, hasData: v > 0 }
+  })
+
+  const validPoints = points.filter(p => p.hasData).sort((a, b) => a.x - b.x)
+
+  let polylineStr = ''
+  let areaStr = ''
+  const botY = (height - padY).toFixed(1)
+
+  if (validPoints.length === 1) {
+    const p = validPoints[0]
+    const x1 = (p.x - 0.5).toFixed(1)
+    const x2 = (p.x + 0.5).toFixed(1)
+    const yStr = p.y.toFixed(1)
+    polylineStr = `${x1},${yStr} ${x2},${yStr}`
+    areaStr = `${x1},${botY} ${x1},${yStr} ${x2},${yStr} ${x2},${botY}`
+  } else if (validPoints.length > 1) {
+    polylineStr = validPoints.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
+    const firstX = validPoints[0].x.toFixed(1)
+    const lastX = validPoints[validPoints.length - 1].x.toFixed(1)
+    areaStr = `${firstX},${botY} ${polylineStr} ${lastX},${botY}`
+  }
+
+  const upperY = height - padY - ((upperThreshold - actualMin) / range) * (height - 2 * padY)
+  const lowerY = height - padY - ((lowerThreshold - actualMin) / range) * (height - 2 * padY)
+
+  // 纵坐标刻度数值生成 (4个均匀分布的刻度值)
+  const yTicks = [1, 0.66, 0.33, 0].map(ratio => {
+    const val = actualMin + ratio * range
+    const y = height - padY - ratio * (height - 2 * padY)
+    return {
+      val: Math.round(val),
+      y
+    }
+  })
+
+  return { 
+    points, 
+    validPoints, 
+    polylineStr, 
+    areaStr, 
+    strokeColor, 
+    unit, 
+    label, 
+    rawValues,
+    padLeft,
+    padRight,
+    lowerThreshold,
+    upperThreshold,
+    upperY,
+    lowerY,
+    yTicks
+  }
 })
 
-// 历史轨迹 Polyline GPS 点位经纬度数组
+// 历史轨迹 Polyline 点集
 const trajectoryWaypoints = computed(() => {
   return trajectoryPointsData.value.map(p => [p.lng, p.lat] as [number, number])
 })
 
 // 当前回放动画位置点
 const runnerCurrentPoint = computed(() => {
-  return trajectoryWaypoints.value[currentTrackStep.value] || trajectoryWaypoints.value[0]
+  return trajectoryWaypoints.value[currentTrackStep.value] || trajectoryWaypoints.value[0] || [device.value.last_longitude || 114.1, device.value.last_latitude || 22.3]
 })
-
-// 热力图点位
-const heatmapDataPoints = computed<{ lng: number; lat: number; count: number }[]>(() => {
-  const lng = device.value.last_longitude || 114.109497
-  const lat = device.value.last_latitude || 22.396428
-  return [
-    { lng: lng, lat: lat, count: 98 },
-    { lng: lng - 0.0060, lat: lat - 0.0030, count: 82 },
-    { lng: lng - 0.0090, lat: lat - 0.0060, count: 65 },
-    { lng: lng - 0.0030, lat: lat - 0.0015, count: 48 },
-    { lng: lng - 0.0150, lat: lat - 0.0100, count: 25 },
-  ]
-})
-
-// 查询设备关联的电子围栏列表
-const fetchGeofences = async () => {
-  try {
-    const res = await axios.get(`http://localhost:8080/api/v1/device/${imei.value}/geofences`)
-    geofences.value = res.data
-  } catch (err) {
-    geofences.value = [
-      {
-        id: 1,
-        imei: imei.value,
-        name: '荃湾社区安全防走失围栏',
-        latitude: device.value.last_latitude,
-        longitude: device.value.last_longitude,
-        radius: 500,
-        fence_type: 'IN',
-        enabled: true
-      }
-    ]
-  }
-}
 
 // 轨迹播放控制逻辑
 const togglePlayback = () => {
@@ -261,6 +393,7 @@ const togglePlayback = () => {
 }
 
 const startPlayback = () => {
+  if (trajectoryWaypoints.value.length === 0) return
   isPlayingTrack.value = true
   if (currentTrackStep.value >= trajectoryWaypoints.value.length - 1) {
     currentTrackStep.value = 0
@@ -305,22 +438,22 @@ const sendCommand = async (cmd: string) => {
 }
 
 const resolveAddress = async (lat: number, lng: number) => {
+  if (!lat || !lng) {
+    resolvedAddressText.value = device.value?.address || '暂无定位数据'
+    return
+  }
   try {
-    const AMap = await AMapLoader.load({
-      key: AMAP_KEY,
-      version: '2.0',
-      plugins: ['AMap.Geocoder'],
-    })
-    const geocoder = new AMap.Geocoder({ city: '全国' })
-    geocoder.getAddress([lng, lat], (status: string, result: any) => {
-      if (status === 'complete' && result.regeocode) {
-        resolvedAddressText.value = result.regeocode.formattedAddress
+    const googleMaps = await getGoogleMapsInstance()
+    const geocoder = new googleMaps.Geocoder()
+    geocoder.geocode({ location: { lat, lng } }, (results: any, status: string) => {
+      if (status === 'OK' && results && results[0]) {
+        resolvedAddressText.value = results[0].formatted_address
       } else {
-        resolvedAddressText.value = device.value.address || `香港特别行政区荃湾区合福工业大厦5楼502`
+        resolvedAddressText.value = device.value?.address || '暂无定位数据'
       }
     })
   } catch (err) {
-    resolvedAddressText.value = device.value.address || `香港特别行政区荃湾区合福工业大厦5楼502`
+    resolvedAddressText.value = device.value?.address || '暂无定位数据'
   }
 }
 
@@ -332,20 +465,49 @@ const getTimeAgoText = (ts: number) => {
   return `${Math.floor(diffSec / 3600)} 小时前`
 }
 
+const formatUpdateTime = (timestamp?: number) => {
+  if (!timestamp) return '刚刚'
+  const date = new Date(timestamp * 1000)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  const hours = String(date.getHours()).padStart(2, '0')
+  const minutes = String(date.getMinutes()).padStart(2, '0')
+  const seconds = String(date.getSeconds()).padStart(2, '0')
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
+}
+
+const isInvalidHealthVal = (val: any) => {
+  return !val || val === 0 || val === 'xxx' || val === '--' || String(val) === '0'
+}
+
+watch(
+  () => [device.value?.last_latitude, device.value?.last_longitude, device.value?.address],
+  ([lat, lng]) => {
+    if (lat && lng) {
+      resolveAddress(Number(lat), Number(lng))
+    } else if (device.value?.address) {
+      resolvedAddressText.value = device.value.address
+    }
+  },
+  { immediate: true }
+)
+
+watch(
+  [() => imei.value, () => store.mockMode, () => trackTimeFilter.value, () => heatmapTimeFilter.value],
+  () => {
+    loadDetailData()
+  },
+  { immediate: true }
+)
+
 onMounted(() => {
   store.fetchAllDevices()
-  fetchGeofences()
-  if (device.value.last_latitude && device.value.last_longitude) {
-    resolveAddress(device.value.last_latitude, device.value.last_longitude)
-  }
+  loadDetailData()
 })
 
 onUnmounted(() => {
   if (playbackTimer) clearInterval(playbackTimer)
-})
-
-watch(() => imei.value, () => {
-  fetchGeofences()
 })
 
 watch(playbackSpeed, () => {
@@ -370,7 +532,7 @@ watch(playbackSpeed, () => {
         </button>
 
         <div class="w-12 h-12 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 font-black text-xl">
-          {{ device.owner_name.slice(0, 1) }}
+          {{ device.owner_name ? device.owner_name.slice(0, 1) : '长' }}
         </div>
 
         <div>
@@ -387,7 +549,7 @@ watch(playbackSpeed, () => {
           <p class="text-xs text-slate-400 font-mono flex items-center space-x-2 mt-1">
             <span>IMEI: {{ device.imei }}</span>
             <span>·</span>
-            <span>监护电话: {{ device.owner_phone }}</span>
+            <span>监护电话: {{ device.owner_phone || '--' }}</span>
           </p>
         </div>
       </div>
@@ -422,7 +584,7 @@ watch(playbackSpeed, () => {
         </button>
       </div>
 
-      <!-- 解法 3 调阅全量报告按钮 & 指令发送 -->
+      <!-- 调阅全量报告按钮 & 指令发送 -->
       <div class="flex items-center space-x-3">
         <button 
           @click="showFullReportModal = true"
@@ -443,7 +605,7 @@ watch(playbackSpeed, () => {
       </div>
     </header>
 
-    <!-- ===== 解法 1: 智能健康风险诊断与全貌总结看板 (AI Health Summary) ===== -->
+    <!-- ===== 智能健康风险诊断与全貌总结看板 (AI Health Summary) ===== -->
     <div class="glass-panel p-4 rounded-2xl border border-slate-800 grid grid-cols-12 gap-4 items-center">
       <!-- 综合风险得分 Circle -->
       <div class="col-span-12 md:col-span-3 border-r border-slate-800/80 pr-4 flex items-center space-x-4">
@@ -477,7 +639,7 @@ watch(playbackSpeed, () => {
           <div>
             <div class="font-bold text-red-300">告警事件摘要</div>
             <div class="text-[11px] text-slate-400 mt-0.5">
-              {{ device.status === 'sos_alert' ? '今日 10:25 触发 1 起 SOS 紧急求救，告警心率 118bpm' : '近 24 小时无未处理的紧急求救告警' }}
+              {{ alarmList.length > 0 ? `记录 ${alarmList.length} 起告警事件 (${alarmList[0].alert_type})` : '近 24 小时无告警记录' }}
             </div>
           </div>
         </div>
@@ -485,9 +647,9 @@ watch(playbackSpeed, () => {
         <div class="bg-slate-900/80 p-2.5 rounded-xl border border-slate-800/80 flex items-start space-x-2">
           <Activity :size="16" class="text-amber-400 flex-shrink-0 mt-0.5" />
           <div>
-            <div class="font-bold text-amber-300">血压与体温预警</div>
+            <div class="font-bold text-amber-300">血压与 HRV 预警</div>
             <div class="text-[11px] text-slate-400 mt-0.5">
-              血压收缩压偏高 (142mmHg)，夜间 02:00 表体温度 37.1°C 处于正常范畴
+              {{ isInvalidHealthVal(device.bp) && isInvalidHealthVal(device.hrv || device.temperature) ? '暂无血压与 HRV 上报数据' : `血压 ${device.bp || '--'}, 心率变异性 ${device.hrv || device.temperature || '--'} ms` }}
             </div>
           </div>
         </div>
@@ -497,7 +659,7 @@ watch(playbackSpeed, () => {
           <div>
             <div class="font-bold text-emerald-300">围栏与血氧范畴</div>
             <div class="text-[11px] text-slate-400 mt-0.5">
-              血氧 98% 含氧良好，电子围栏防护在中西区/荃湾社区安全圈内
+              {{ geofences.length > 0 ? `已激活 ${geofences.length} 个防护围栏` : '暂无启用中的围栏防护规则' }}
             </div>
           </div>
         </div>
@@ -512,11 +674,14 @@ watch(playbackSpeed, () => {
           <Heart :size="16" class="text-rose-400" />
         </div>
         <div class="text-2xl font-black text-white mt-1 font-mono">
-          {{ device.last_heart_rate || '--' }} <span class="text-xs text-slate-400 font-normal">bpm</span>
+          {{ isInvalidHealthVal(device.last_heart_rate) ? '--' : device.last_heart_rate }} <span class="text-xs text-slate-400 font-normal">bpm</span>
         </div>
-        <span :class="['text-[10px] font-medium mt-0.5', device.last_heart_rate > 100 ? 'text-red-400 font-bold' : 'text-emerald-400']">
-          {{ device.last_heart_rate === 0 ? '设备离线未上报' : device.last_heart_rate > 100 ? '心率过高告警' : '正常静息范围' }}
-        </span>
+        <div class="flex items-center justify-between mt-1 text-[10px]">
+          <span :class="['font-medium', isInvalidHealthVal(device.last_heart_rate) ? 'text-slate-500' : Number(device.last_heart_rate) > 100 ? 'text-red-400 font-bold' : 'text-emerald-400']">
+            {{ isInvalidHealthVal(device.last_heart_rate) ? '暂无数据' : Number(device.last_heart_rate) > 100 ? '心率过高告警' : '正常静息范围' }}
+          </span>
+          <span v-if="!isInvalidHealthVal(device.last_heart_rate) && device.hr_updated_at" class="text-slate-400 font-medium">获取时间: {{ formatUpdateTime(device.hr_updated_at) }}</span>
+        </div>
       </div>
 
       <div class="glass-panel p-3.5 rounded-2xl flex flex-col justify-between">
@@ -524,8 +689,13 @@ watch(playbackSpeed, () => {
           <span class="text-xs font-medium">参考血压</span>
           <Activity :size="16" class="text-blue-400" />
         </div>
-        <div class="text-2xl font-black text-white mt-1 font-mono">{{ device.bp || '120/78' }} <span class="text-xs text-slate-400 font-normal">mmHg</span></div>
-        <span class="text-[10px] text-blue-400 font-medium mt-0.5">理想血压范围</span>
+        <div class="text-2xl font-black text-white mt-1 font-mono">{{ isInvalidHealthVal(device.bp) ? '--' : device.bp }} <span class="text-xs text-slate-400 font-normal">mmHg</span></div>
+        <div class="flex items-center justify-between mt-1 text-[10px]">
+          <span class="font-medium" :class="isInvalidHealthVal(device.bp) ? 'text-slate-500' : 'text-blue-400'">
+            {{ isInvalidHealthVal(device.bp) ? '暂无数据' : '理想血压范围' }}
+          </span>
+          <span v-if="!isInvalidHealthVal(device.bp) && device.bp_updated_at" class="text-slate-400 font-medium">获取时间: {{ formatUpdateTime(device.bp_updated_at) }}</span>
+        </div>
       </div>
 
       <div class="glass-panel p-3.5 rounded-2xl flex flex-col justify-between">
@@ -533,17 +703,27 @@ watch(playbackSpeed, () => {
           <span class="text-xs font-medium">血氧饱和度</span>
           <Zap :size="16" class="text-cyan-400" />
         </div>
-        <div class="text-2xl font-black text-white mt-1 font-mono">{{ device.spo2 || 98 }} <span class="text-xs text-slate-400 font-normal">%</span></div>
-        <span class="text-[10px] text-cyan-400 font-medium mt-0.5">含氧量极其良好</span>
+        <div class="text-2xl font-black text-white mt-1 font-mono">{{ isInvalidHealthVal(device.spo2) ? '--' : device.spo2 }} <span class="text-xs text-slate-400 font-normal">%</span></div>
+        <div class="flex items-center justify-between mt-1 text-[10px]">
+          <span class="font-medium" :class="isInvalidHealthVal(device.spo2) ? 'text-slate-500' : 'text-cyan-400'">
+            {{ isInvalidHealthVal(device.spo2) ? '暂无数据' : '含氧量良好' }}
+          </span>
+          <span v-if="!isInvalidHealthVal(device.spo2) && device.spo2_updated_at" class="text-slate-400 font-medium">获取时间: {{ formatUpdateTime(device.spo2_updated_at) }}</span>
+        </div>
       </div>
 
       <div class="glass-panel p-3.5 rounded-2xl flex flex-col justify-between">
         <div class="flex items-center justify-between text-slate-400">
-          <span class="text-xs font-medium">表体温度</span>
+          <span class="text-xs font-medium">心率变异性 (HRV)</span>
           <Activity :size="16" class="text-emerald-400" />
         </div>
-        <div class="text-2xl font-black text-white mt-1 font-mono">{{ device.temperature || 36.6 }} <span class="text-xs text-slate-400 font-normal">°C</span></div>
-        <span class="text-[10px] text-emerald-400 font-medium mt-0.5">体温正常</span>
+        <div class="text-2xl font-black text-white mt-1 font-mono">{{ isInvalidHealthVal(device.hrv || device.temperature) ? '--' : (device.hrv || device.temperature) }} <span class="text-xs text-slate-400 font-normal">ms</span></div>
+        <div class="flex items-center justify-between mt-1 text-[10px]">
+          <span class="font-medium" :class="isInvalidHealthVal(device.hrv || device.temperature) ? 'text-slate-500' : 'text-emerald-400'">
+            {{ isInvalidHealthVal(device.hrv || device.temperature) ? '暂无数据' : '自主神经调节良好' }}
+          </span>
+          <span v-if="!isInvalidHealthVal(device.hrv || device.temperature) && (device.hrv_updated_at || device.temp_updated_at)" class="text-slate-400 font-medium">获取时间: {{ formatUpdateTime(device.hrv_updated_at || device.temp_updated_at) }}</span>
+        </div>
       </div>
 
       <div class="glass-panel p-3.5 rounded-2xl flex flex-col justify-between">
@@ -551,17 +731,25 @@ watch(playbackSpeed, () => {
           <span class="text-xs font-medium">设备剩余电量</span>
           <Battery :size="16" class="text-amber-400" />
         </div>
-        <div class="text-2xl font-black text-amber-300 mt-1 font-mono">{{ device.battery }} <span class="text-xs text-slate-400 font-normal">%</span></div>
-        <span class="text-[10px] text-slate-400 mt-0.5">预估可用 {{ Math.floor(device.battery * 0.5) }} 小时</span>
+        <div class="text-2xl font-black text-amber-300 mt-1 font-mono">{{ device.battery ?? '--' }} <span class="text-xs text-slate-400 font-normal">%</span></div>
+        <div class="flex items-center justify-between mt-1 text-[10px]">
+          <span class="font-medium text-amber-400">电量正常</span>
+          <span v-if="device.battery !== null && device.battery !== undefined && device.battery !== ''" class="text-slate-400 font-medium">获取时间: {{ formatUpdateTime(device.battery_updated_at || device.updated_at) }}</span>
+        </div>
       </div>
 
       <div class="glass-panel p-3.5 rounded-2xl flex flex-col justify-between">
         <div class="flex items-center justify-between text-slate-400">
-          <span class="text-xs font-medium">今日运动计步</span>
+          <span class="text-xs font-medium">运动步数</span>
           <User :size="16" class="text-indigo-400" />
         </div>
-        <div class="text-2xl font-black text-white mt-1 font-mono">{{ (device.steps || 5200).toLocaleString() }} <span class="text-xs text-slate-400 font-normal">步</span></div>
-        <span class="text-[10px] text-indigo-400 font-medium mt-0.5">健康活力分: 88分</span>
+        <div class="text-2xl font-black text-white mt-1 font-mono">{{ isInvalidHealthVal(device.steps) ? '--' : device.steps }} <span class="text-xs text-slate-400 font-normal">步</span></div>
+        <div class="flex items-center justify-between mt-1 text-[10px]">
+          <span class="font-medium" :class="isInvalidHealthVal(device.steps) ? 'text-slate-500' : 'text-indigo-400'">
+            {{ isInvalidHealthVal(device.steps) ? '暂无数据' : '健康活力分' }}
+          </span>
+          <span v-if="!isInvalidHealthVal(device.steps) && device.steps_updated_at" class="text-slate-400 font-medium">获取时间: {{ formatUpdateTime(device.steps_updated_at) }}</span>
+        </div>
       </div>
     </div>
 
@@ -570,23 +758,23 @@ watch(playbackSpeed, () => {
       
       <!-- 左侧 7 列: 实时高精地图与定位硬件遥测 -->
       <div class="col-span-12 lg:col-span-7 flex flex-col space-y-4">
-        <!-- 实时地图 (Zoom 18 最大拉近 + 电子围栏圈) -->
+        <!-- 实时地图 -->
         <div class="glass-panel rounded-2xl overflow-hidden border border-slate-800 flex-1 min-h-[440px] relative flex flex-col">
           <div class="p-3 border-b border-slate-800 flex items-center justify-between bg-slate-900/80 backdrop-blur-md z-10">
             <div class="flex items-center space-x-2">
               <MapPin :size="16" class="text-cyan-400" />
-              <span class="text-xs font-bold text-slate-200">实时楼栋/门牌级最大精细定位 (Zoom 18)</span>
+              <span class="text-xs font-bold text-slate-200">实时楼栋/门牌级精细定位 (Zoom 15)</span>
             </div>
             <div class="flex items-center space-x-2 font-mono">
               <span :class="['px-2 py-0.5 rounded text-[10px] font-bold border',
-                device.fix_mode === 'GPS' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' :
-                device.fix_mode === 'WIFI' ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30' :
-                'bg-slate-800 text-slate-400 border-slate-700']"
+                (device.location_type || device.last_location_type) === 'GPS' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' :
+                (device.location_type || device.last_location_type) === 'WIFI' ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30' :
+                'bg-purple-500/20 text-purple-300 border-purple-500/30']"
               >
-                {{ device.fix_mode || 'GPS' }} 模式定位
+                {{ (device.location_type || device.last_location_type || 'GPS') }} 模式定位
               </span>
-              <span class="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-[10px] font-bold">
-                更新时效: {{ getTimeAgoText(device.updated_at) }}
+              <span class="px-2 py-0.5 rounded bg-slate-800/90 text-cyan-300 border border-slate-700 text-[10px] font-bold">
+                获取时间: {{ formatUpdateTime(device.updated_at) }} ({{ getTimeAgoText(device.updated_at) }})
               </span>
             </div>
           </div>
@@ -595,7 +783,7 @@ watch(playbackSpeed, () => {
             <AmapDashboard 
               :devices="[device]" 
               :selectedImei="device.imei"
-              :zoomLevel="18"
+              :zoomLevel="15"
               :showTrack="false"
               :showHeatmap="false"
               :geofences="geofences"
@@ -606,19 +794,28 @@ watch(playbackSpeed, () => {
         <!-- 详细地址解析与硬件遥测组合栏 -->
         <div class="glass-panel rounded-2xl p-4 border border-slate-800 grid grid-cols-12 gap-4">
           <div class="col-span-7 space-y-1.5 border-r border-slate-800 pr-4">
-            <div class="text-[11px] text-slate-400 font-mono">反向高德 Geocoder 解析中文地址:</div>
+            <div class="text-[11px] text-slate-400 font-mono">反向 Geocoder 解析中文地址:</div>
             <div class="text-xs text-cyan-300 font-bold leading-relaxed">{{ resolvedAddressText }}</div>
             <div class="text-[11px] text-slate-400 pt-1">责任网格员: <span class="text-slate-200 font-medium">陈专员 (0755-88889999)</span></div>
           </div>
           <div class="col-span-5 space-y-2 text-[11px] font-mono">
-            <div class="grid grid-cols-2 gap-1.5">
+            <div class="grid grid-cols-3 gap-1.5">
               <div class="bg-slate-900/80 p-1.5 rounded-lg border border-slate-800">
-                <span class="text-slate-400 block text-[10px]">卫星数</span>
-                <span class="text-white font-bold">{{ device.satellites ?? 12 }} 颗</span>
+                <span class="text-slate-400 block text-[9px]">定位参考</span>
+                <span class="font-bold text-[11px]" :class="
+                  (device.last_location_type || device.location_type) === 'GPS' ? 'text-emerald-400' :
+                  (device.last_location_type || device.location_type) === 'WIFI' ? 'text-cyan-400' : 'text-purple-400'
+                ">
+                  {{ (device.last_location_type || device.location_type || 'GPS') }}
+                </span>
               </div>
               <div class="bg-slate-900/80 p-1.5 rounded-lg border border-slate-800">
-                <span class="text-slate-400 block text-[10px]">定位误差</span>
-                <span class="text-emerald-400 font-bold">±{{ device.accuracy ?? 5 }}m</span>
+                <span class="text-slate-400 block text-[9px]">卫星数</span>
+                <span class="text-white font-bold text-[11px]">{{ device.satellites ?? 0 }} 颗</span>
+              </div>
+              <div class="bg-slate-900/80 p-1.5 rounded-lg border border-slate-800">
+                <span class="text-slate-400 block text-[9px]">定位误差</span>
+                <span class="text-emerald-400 font-bold text-[11px]">±{{ device.accuracy ?? 18 }}m</span>
               </div>
             </div>
             <div class="flex items-center justify-between text-slate-400 pt-1">
@@ -654,7 +851,8 @@ watch(playbackSpeed, () => {
             </span>
           </div>
 
-          <div v-if="geofences.length === 0" class="text-xs text-slate-500 py-2 text-center">
+          <!-- 空状态逻辑：无围栏数据时展示 -->
+          <div v-if="geofences.length === 0" class="text-xs text-slate-500 py-6 text-center font-mono">
             暂无设定中的电子围栏规则
           </div>
           <div v-else class="space-y-2">
@@ -674,7 +872,7 @@ watch(playbackSpeed, () => {
                 </div>
                 <div class="text-[10px] text-slate-400 flex items-center space-x-3">
                   <span>保护半径: <strong class="text-cyan-400 font-bold">{{ fence.radius }}m</strong></span>
-                  <span>坐标: {{ fence.latitude.toFixed(3) }}, {{ fence.longitude.toFixed(3) }}</span>
+                  <span>防护中心: {{ device?.address || '社区安全圈' }}</span>
                 </div>
               </div>
 
@@ -689,16 +887,14 @@ watch(playbackSpeed, () => {
           </div>
         </div>
 
-        <!-- ===== 解法 2: 24h 体征趋势多维指标一键切换看板 ===== -->
+        <!-- 2. 24h 体征趋势多维指标看板 -->
         <div class="glass-panel rounded-2xl p-4 border border-slate-800 flex flex-col justify-between">
-          <!-- 切换 Header 按钮组 -->
           <div class="flex items-center justify-between mb-3 border-b border-slate-800 pb-2">
             <h3 class="text-xs font-bold text-slate-200 flex items-center space-x-2">
               <TrendingUp :size="16" class="text-cyan-400" />
               <span>近 24 小时体征趋势</span>
             </h3>
 
-            <!-- 5 大指标多切一切换器 -->
             <div class="flex items-center space-x-1 bg-slate-900/90 p-1 rounded-xl border border-slate-800 text-[10px] font-bold">
               <button 
                 @click="selectedMetric = 'hr'" 
@@ -713,9 +909,9 @@ watch(playbackSpeed, () => {
                 :class="['px-2 py-0.5 rounded-lg transition', selectedMetric === 'spo2' ? 'bg-cyan-600 text-white shadow' : 'text-slate-400 hover:text-white']"
               >🫁 血氧</button>
               <button 
-                @click="selectedMetric = 'temp'" 
-                :class="['px-2 py-0.5 rounded-lg transition', selectedMetric === 'temp' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400 hover:text-white']"
-              >🌡️ 体温</button>
+                @click="selectedMetric = 'hrv'" 
+                :class="['px-2 py-0.5 rounded-lg transition', selectedMetric === 'hrv' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400 hover:text-white']"
+              >🫀 HRV变异性</button>
               <button 
                 @click="selectedMetric = 'steps'" 
                 :class="['px-2 py-0.5 rounded-lg transition', selectedMetric === 'steps' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white']"
@@ -723,93 +919,158 @@ watch(playbackSpeed, () => {
             </div>
           </div>
 
-          <!-- 动态切换渲染柱状图 / 趋势线 -->
-          <div class="h-32 flex items-end justify-between space-x-1 pt-3 pb-1 px-1 bg-slate-900/60 rounded-xl border border-slate-800/60">
-            <!-- 1. ❤️ 心率趋势 -->
-            <template v-if="selectedMetric === 'hr'">
-              <div 
-                v-for="(v, idx) in hr24Series" 
-                :key="idx"
-                class="flex-1 flex flex-col items-center group relative"
-              >
-                <div 
-                  :style="{ height: `${(v / 130) * 100}%` }"
-                  :class="['w-full rounded-t transition-all duration-300',
-                    v > 100 ? 'bg-red-500 shadow-lg shadow-red-500/50' : 'bg-rose-500/80 hover:bg-rose-400']"
-                ></div>
-                <div class="absolute bottom-full mb-1 hidden group-hover:flex bg-slate-900 border border-slate-700 px-2 py-1 rounded text-[10px] text-white font-mono z-20 whitespace-nowrap">
-                  {{ idx }}:00 - 心率 {{ v }} bpm
-                </div>
-              </div>
-            </template>
+          <!-- 动态渲染 24 小时体征趋势时间点线图 (Line & Point Chart) -->
+          <div class="h-36 bg-slate-900/80 rounded-xl border border-slate-800/80 p-3 relative flex flex-col justify-between overflow-hidden">
+            <div v-if="chartMetricInfo.rawValues.length === 0" class="w-full h-full flex items-center justify-center text-slate-500 text-xs font-mono">
+              暂无 24 小时 {{ chartMetricInfo.label }} 趋势数据
+            </div>
+            <template v-else>
+              <div class="w-full h-full relative">
+                <svg class="w-full h-full overflow-visible" viewBox="0 0 560 110" preserveAspectRatio="none">
+                  <defs>
+                    <linearGradient id="vitalsChartGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                      <stop offset="0%" :stop-color="chartMetricInfo.strokeColor" stop-opacity="0.4" />
+                      <stop offset="100%" :stop-color="chartMetricInfo.strokeColor" stop-opacity="0.0" />
+                    </linearGradient>
+                  </defs>
 
-            <!-- 2. 🩸 血压趋势 (收缩压/舒张压) -->
-            <template v-else-if="selectedMetric === 'bp'">
-              <div 
-                v-for="(v, idx) in bpSysSeries" 
-                :key="idx"
-                class="flex-1 flex flex-col items-center group relative"
-              >
-                <div 
-                  :style="{ height: `${(v / 160) * 100}%` }"
-                  :class="['w-full rounded-t transition-all duration-300',
-                    v > 140 ? 'bg-amber-500 shadow-lg shadow-amber-500/50' : 'bg-blue-500/80 hover:bg-blue-400']"
-                ></div>
-                <div class="absolute bottom-full mb-1 hidden group-hover:flex bg-slate-900 border border-slate-700 px-2 py-1 rounded text-[10px] text-white font-mono z-20 whitespace-nowrap">
-                  {{ idx }}:00 - 血压 {{ v }}/{{ bpDiaSeries[idx] }} mmHg
-                </div>
-              </div>
-            </template>
+                  <!-- 背景轴线 & 纵坐标刻度数值 (Y-Axis Values) -->
+                  <line :x1="chartMetricInfo.padLeft" y1="12" :x2="chartMetricInfo.padLeft" y2="95" stroke="#334155" stroke-width="1" />
 
-            <!-- 3. 🫁 血氧趋势 -->
-            <template v-else-if="selectedMetric === 'spo2'">
-              <div 
-                v-for="(v, idx) in spo2Series" 
-                :key="idx"
-                class="flex-1 flex flex-col items-center group relative"
-              >
-                <div 
-                  :style="{ height: `${((v - 90) / 10) * 100}%` }"
-                  :class="['w-full rounded-t transition-all duration-300',
-                    v < 95 ? 'bg-red-500' : 'bg-cyan-500/80 hover:bg-cyan-400']"
-                ></div>
-                <div class="absolute bottom-full mb-1 hidden group-hover:flex bg-slate-900 border border-slate-700 px-2 py-1 rounded text-[10px] text-white font-mono z-20 whitespace-nowrap">
-                  {{ idx }}:00 - 血氧 {{ v }}%
-                </div>
-              </div>
-            </template>
+                  <g class="y-axis-labels">
+                    <text 
+                      v-for="(tick, idx) in chartMetricInfo.yTicks" 
+                      :key="idx"
+                      :x="chartMetricInfo.padLeft - 6" 
+                      :y="tick.y + 3" 
+                      text-anchor="end" 
+                      fill="#94a3b8" 
+                      font-size="9" 
+                      font-family="monospace"
+                    >
+                      {{ tick.val }}
+                    </text>
+                  </g>
 
-            <!-- 4. 🌡️ 体温趋势 -->
-            <template v-else-if="selectedMetric === 'temp'">
-              <div 
-                v-for="(v, idx) in tempSeries" 
-                :key="idx"
-                class="flex-1 flex flex-col items-center group relative"
-              >
-                <div 
-                  :style="{ height: `${((v - 35) / 3) * 100}%` }"
-                  :class="['w-full rounded-t transition-all duration-300',
-                    v > 37.2 ? 'bg-amber-500' : 'bg-emerald-500/80 hover:bg-emerald-400']"
-                ></div>
-                <div class="absolute bottom-full mb-1 hidden group-hover:flex bg-slate-900 border border-slate-700 px-2 py-1 rounded text-[10px] text-white font-mono z-20 whitespace-nowrap">
-                  {{ idx }}:00 - 体温 {{ v }}°C
-                </div>
-              </div>
-            </template>
+                  <!-- 背景参考平稳网格虚线 -->
+                  <line :x1="chartMetricInfo.padLeft" y1="20" :x2="560 - chartMetricInfo.padRight" y2="20" stroke="#334155" stroke-dasharray="3 3" stroke-opacity="0.2" />
+                  <line :x1="chartMetricInfo.padLeft" y1="55" :x2="560 - chartMetricInfo.padRight" y2="55" stroke="#334155" stroke-dasharray="3 3" stroke-opacity="0.2" />
+                  <line :x1="chartMetricInfo.padLeft" y1="90" :x2="560 - chartMetricInfo.padRight" y2="90" stroke="#334155" stroke-dasharray="3 3" stroke-opacity="0.2" />
 
-            <!-- 5. 🚶 计步趋势 -->
-            <template v-else-if="selectedMetric === 'steps'">
-              <div 
-                v-for="(v, idx) in stepsSeries" 
-                :key="idx"
-                class="flex-1 flex flex-col items-center group relative"
-              >
-                <div 
-                  :style="{ height: `${(v / 1200) * 100}%` }"
-                  class="w-full rounded-t bg-indigo-500/80 hover:bg-indigo-400 transition-all duration-300"
-                ></div>
-                <div class="absolute bottom-full mb-1 hidden group-hover:flex bg-slate-900 border border-slate-700 px-2 py-1 rounded text-[10px] text-white font-mono z-20 whitespace-nowrap">
-                  {{ idx }}:00 - 步数 {{ v }} 步
+                  <!-- 上下 2 条阈值横虚线 (Threshold Dashed Lines) -->
+                  <!-- 1. 上阈值横虚线 (上限) -->
+                  <g v-if="chartMetricInfo.upperY >= 10 && chartMetricInfo.upperY <= 95">
+                    <line 
+                      :x1="chartMetricInfo.padLeft" 
+                      :y1="chartMetricInfo.upperY" 
+                      :x2="560 - chartMetricInfo.padRight" 
+                      :y2="chartMetricInfo.upperY" 
+                      stroke="#ef4444" 
+                      stroke-dasharray="4 4" 
+                      stroke-width="1.2" 
+                      stroke-opacity="0.85" 
+                    />
+                    <text 
+                      :x="560 - chartMetricInfo.padRight - 2" 
+                      :y="chartMetricInfo.upperY - 3" 
+                      text-anchor="end" 
+                      fill="#f87171" 
+                      font-size="8" 
+                      font-family="monospace"
+                      font-weight="bold"
+                    >
+                      上限 {{ chartMetricInfo.upperThreshold }} {{ chartMetricInfo.unit }}
+                    </text>
+                  </g>
+
+                  <!-- 2. 下阈值横虚线 (下限) -->
+                  <g v-if="chartMetricInfo.lowerY >= 10 && chartMetricInfo.lowerY <= 95">
+                    <line 
+                      :x1="chartMetricInfo.padLeft" 
+                      :y1="chartMetricInfo.lowerY" 
+                      :x2="560 - chartMetricInfo.padRight" 
+                      :y2="chartMetricInfo.lowerY" 
+                      stroke="#f59e0b" 
+                      stroke-dasharray="4 4" 
+                      stroke-width="1.2" 
+                      stroke-opacity="0.85" 
+                    />
+                    <text 
+                      :x="560 - chartMetricInfo.padRight - 2" 
+                      :y="chartMetricInfo.lowerY + 9" 
+                      text-anchor="end" 
+                      fill="#fbbf24" 
+                      font-size="8" 
+                      font-family="monospace"
+                      font-weight="bold"
+                    >
+                      下限 {{ chartMetricInfo.lowerThreshold }} {{ chartMetricInfo.unit }}
+                    </text>
+                  </g>
+
+                  <!-- 渐变阴影填充面积 -->
+                  <polygon :points="chartMetricInfo.areaStr" fill="url(#vitalsChartGrad)" />
+
+                  <!-- 时间点连接折线 -->
+                  <polyline 
+                    :points="chartMetricInfo.polylineStr" 
+                    fill="none" 
+                    :stroke="chartMetricInfo.strokeColor" 
+                    stroke-width="2.5" 
+                    stroke-linecap="round" 
+                    stroke-linejoin="round" 
+                  />
+
+                  <!-- 时间节点：仅在有真实上发数据的时刻渲染节点圆圈 -->
+                  <g v-for="(p, idx) in chartMetricInfo.validPoints" :key="idx" class="group cursor-pointer">
+                    <circle 
+                      :cx="p.x" 
+                      :cy="p.y" 
+                      r="4" 
+                      :fill="chartMetricInfo.strokeColor" 
+                      stroke="#0f172a" 
+                      stroke-width="2" 
+                      class="transition-all duration-200 group-hover:r-6"
+                    />
+                    <!-- Tooltip 节点数据悬浮浮层 -->
+                    <g class="opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none">
+                      <rect 
+                        :x="Math.max(5, Math.min(470, p.x - 45))" 
+                        :y="Math.max(2, p.y - 28)" 
+                        width="90" 
+                        height="22" 
+                        rx="5" 
+                        fill="#0f172a" 
+                        stroke="#475569" 
+                        stroke-width="1" 
+                      />
+                      <text 
+                        :x="Math.max(5, Math.min(470, p.x - 45)) + 45" 
+                        :y="Math.max(2, p.y - 28) + 15" 
+                        text-anchor="middle" 
+                        fill="#ffffff" 
+                        font-size="10" 
+                        font-family="monospace" 
+                        font-weight="bold"
+                      >
+                        {{ p.timeLabel }} : {{ p.value }} {{ chartMetricInfo.unit }}
+                      </text>
+                    </g>
+                  </g>
+                </svg>
+
+                <!-- X 轴时间刻度 -->
+                <div class="absolute bottom-0 left-[45px] right-[20px] flex justify-between px-1 text-[9px] font-mono text-slate-400 pointer-events-none transform translate-y-2">
+                  <template v-if="selectedMetric === 'steps'">
+                    <span v-for="t in ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00', '23:00']" :key="t">
+                      {{ t }}
+                    </span>
+                  </template>
+                  <template v-else>
+                    <span v-for="(p, i) in chartMetricInfo.points.filter((_, index) => [0, 4, 8, 12, 16, 20, 23].includes(index))" :key="i">
+                      {{ p.timeLabel }}
+                    </span>
+                  </template>
                 </div>
               </div>
             </template>
@@ -823,35 +1084,34 @@ watch(playbackSpeed, () => {
               <ShieldAlert :size="16" class="text-amber-400" />
               <span>设备历史告警记录</span>
             </h3>
-            <span class="text-[10px] text-slate-400 font-mono">累计告警: 2 次</span>
+            <span class="text-[10px] text-slate-400 font-mono">累计告警: {{ alarmList.length }} 次</span>
           </div>
 
-          <div class="space-y-2 flex-1 overflow-y-auto max-h-[140px] pr-1">
-            <div class="bg-red-950/30 border border-red-500/30 rounded-xl p-2.5 flex items-center justify-between text-xs">
+          <div v-if="alarmList.length === 0" class="flex-1 flex items-center justify-center text-xs text-slate-500 font-mono py-6">
+            暂无历史告警记录
+          </div>
+          <div v-else class="space-y-2 flex-1 overflow-y-auto max-h-[140px] pr-1">
+            <div 
+              v-for="item in alarmList"
+              :key="item.id"
+              :class="['border rounded-xl p-2.5 flex items-center justify-between text-xs',
+                item.category === 'SOS' || item.category === 'FALL' ? 'bg-red-950/30 border-red-500/30' : 'bg-slate-900/60 border-slate-800']"
+            >
               <div>
-                <div class="font-bold text-red-300 flex items-center space-x-2">
-                  <span>SOS 紧急求救告警</span>
-                  <span class="text-[9px] px-1.5 py-0.5 rounded bg-red-500/30 text-red-200 font-mono">SOS</span>
+                <div class="font-bold flex items-center space-x-2" :class="item.category === 'SOS' || item.category === 'FALL' ? 'text-red-300' : 'text-slate-300'">
+                  <span>{{ item.alert_type }}</span>
+                  <span class="text-[9px] px-1.5 py-0.5 rounded bg-red-500/30 text-red-200 font-mono">{{ item.category }}</span>
                 </div>
-                <div class="text-[10px] text-slate-400 mt-0.5">触发心率: 118 bpm · 坐标: {{ device.last_latitude.toFixed(4) }}, {{ device.last_longitude.toFixed(4) }}</div>
+                <div class="text-[10px] text-slate-400 mt-0.5">
+                  触发心率: {{ item.heart_rate || '--' }} bpm · 位置: ({{ item.latitude.toFixed(4) }}, {{ item.longitude.toFixed(4) }})
+                </div>
               </div>
               <div class="text-right font-mono">
-                <span class="text-emerald-400 font-bold text-[9px] px-2 py-0.5 bg-emerald-500/10 rounded-full border border-emerald-500/20">已处理</span>
-                <div class="text-[10px] text-slate-500 mt-0.5">今天 10:25</div>
-              </div>
-            </div>
-
-            <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-2.5 flex items-center justify-between text-xs">
-              <div>
-                <div class="font-bold text-slate-300 flex items-center space-x-2">
-                  <span>心率异常预警 (128bpm)</span>
-                  <span class="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono">HR</span>
-                </div>
-                <div class="text-[10px] text-slate-400 mt-0.5">静息心率过高自动触发记录</div>
-              </div>
-              <div class="text-right font-mono">
-                <span class="text-slate-400 font-bold text-[9px] px-2 py-0.5 bg-slate-800 rounded-full border border-slate-700">自动恢复</span>
-                <div class="text-[10px] text-slate-500 mt-0.5">昨天 18:40</div>
+                <span :class="['font-bold text-[9px] px-2 py-0.5 rounded-full border',
+                  item.status === 'COMPLETED' ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' : 'text-amber-400 bg-amber-500/10 border-amber-500/20']">
+                  {{ item.status === 'COMPLETED' ? '已处理' : '未处理' }}
+                </span>
+                <div class="text-[10px] text-slate-500 mt-0.5">{{ item.trigger_time }}</div>
               </div>
             </div>
           </div>
@@ -860,19 +1120,16 @@ watch(playbackSpeed, () => {
       </div>
     </div>
 
-    <!-- ===== TAB 2: 🛣️ 历史轨迹追溯视图 (完整位置中文名与动画播放) ===== -->
+    <!-- ===== TAB 2: 🛣️ 历史轨迹追溯视图 ===== -->
     <div v-else-if="activeTab === 'trajectory'" class="grid grid-cols-12 gap-5 flex-1">
-      <!-- 左侧 8 列: 轨迹地图与动画回放播放器 -->
       <div class="col-span-12 lg:col-span-8 flex flex-col space-y-4">
         <div class="glass-panel rounded-2xl overflow-hidden border border-slate-800 flex-1 min-h-[480px] relative flex flex-col">
-          <!-- 轨迹地图工具栏 -->
           <div class="p-3 border-b border-slate-800 flex items-center justify-between bg-slate-900/80 backdrop-blur-md z-10">
             <div class="flex items-center space-x-3">
               <Navigation :size="16" class="text-blue-400" />
-              <span class="text-xs font-bold text-slate-200">纯净 GPS 历史轨迹 Polyline 动画播放</span>
+              <span class="text-xs font-bold text-slate-200">历史轨迹 Polyline 动画播放</span>
             </div>
 
-            <!-- 时间筛选控制器 -->
             <div class="flex items-center space-x-1 bg-slate-950/80 p-0.5 rounded-lg border border-slate-800">
               <button 
                 @click="trackTimeFilter = 'today'"
@@ -889,24 +1146,24 @@ watch(playbackSpeed, () => {
             </div>
           </div>
 
-          <!-- 高德轨迹地图组件 -->
           <div class="flex-1 relative">
             <AmapDashboard 
               :devices="[device]" 
               :selectedImei="device.imei"
-              :showTrack="true"
+              :showTrack="trajectoryWaypoints.length > 0"
               :trackPoints="trajectoryWaypoints"
               :runnerPoint="runnerCurrentPoint"
               :showHeatmap="false"
             />
           </div>
 
-          <!-- 底部轨迹播放控制器 Bottom Bar -->
+          <!-- 底部轨迹播放控制器 -->
           <div class="p-3 border-t border-slate-800 bg-slate-900/90 backdrop-blur-md flex items-center justify-between z-10 font-mono text-xs">
             <div class="flex items-center space-x-3">
               <button 
                 @click="togglePlayback" 
-                class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold flex items-center space-x-1.5 shadow-lg shadow-blue-600/30 active:scale-95 transition"
+                :disabled="trajectoryWaypoints.length === 0"
+                class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold flex items-center space-x-1.5 shadow-lg shadow-blue-600/30 active:scale-95 transition disabled:opacity-50"
               >
                 <Pause v-if="isPlayingTrack" :size="16" />
                 <Play v-else :size="16" />
@@ -927,14 +1184,13 @@ watch(playbackSpeed, () => {
             </div>
 
             <div class="text-slate-400 flex items-center space-x-2">
-              <span>当前驻留点: <strong class="text-blue-400 font-bold">{{ trajectoryPointsData[currentTrackStep]?.locationName }}</strong></span>
-              <span>({{ currentTrackStep + 1 }}/{{ trajectoryPointsData.length }})</span>
+              <span v-if="trajectoryPointsData.length > 0">当前驻留点: <strong class="text-blue-400 font-bold">{{ trajectoryPointsData[currentTrackStep]?.locationName }}</strong> ({{ currentTrackStep + 1 }}/{{ trajectoryPointsData.length }})</span>
+              <span v-else class="text-slate-500">暂无定位轨迹点</span>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- 右侧 4 列: 包含中文位置名称与详细地址的采样明细列表 -->
       <div class="col-span-12 lg:col-span-4 flex flex-col space-y-4">
         <div class="glass-panel rounded-2xl p-5 border border-slate-800 space-y-3">
           <h3 class="text-xs font-bold text-slate-200 flex items-center space-x-2 border-b border-slate-800 pb-2">
@@ -945,11 +1201,11 @@ watch(playbackSpeed, () => {
           <div class="grid grid-cols-2 gap-2 text-xs font-mono">
             <div class="bg-slate-900 p-2.5 rounded-xl border border-slate-800">
               <span class="text-slate-400 block text-[10px]">全天移动总里程</span>
-              <span class="text-blue-400 font-bold text-sm">4.25 公里</span>
+              <span class="text-blue-400 font-bold text-sm">{{ totalDistance.toFixed(2) }} 公里</span>
             </div>
             <div class="bg-slate-900 p-2.5 rounded-xl border border-slate-800">
               <span class="text-slate-400 block text-[10px]">平均移动时速</span>
-              <span class="text-emerald-400 font-bold text-sm">2.4 km/h</span>
+              <span class="text-emerald-400 font-bold text-sm">{{ avgSpeed.toFixed(1) }} km/h</span>
             </div>
           </div>
         </div>
@@ -957,10 +1213,13 @@ watch(playbackSpeed, () => {
         <div class="glass-panel rounded-2xl p-5 border border-slate-800 flex-1 flex flex-col min-h-[300px]">
           <h3 class="text-xs font-bold text-slate-200 flex items-center space-x-2 mb-3 border-b border-slate-800 pb-2">
             <MapPin :size="16" class="text-cyan-400" />
-            <span>沿途 GPS 中文地标与采样点明细</span>
+            <span>沿途中文地标与采样点明细</span>
           </h3>
 
-          <div class="space-y-2.5 flex-1 overflow-y-auto max-h-[360px] pr-1 font-mono text-xs">
+          <div v-if="trajectoryPointsData.length === 0" class="flex-1 flex items-center justify-center text-xs text-slate-500 font-mono py-8">
+            暂无历史轨迹记录
+          </div>
+          <div v-else class="space-y-2.5 flex-1 overflow-y-auto max-h-[360px] pr-1 font-mono text-xs">
             <div 
               v-for="(item, idx) in trajectoryPointsData" 
               :key="item.id"
@@ -977,6 +1236,15 @@ watch(playbackSpeed, () => {
                 <div>
                   <div class="font-bold text-slate-100 flex items-center space-x-1.5">
                     <span>{{ item.locationName }}</span>
+                    <span 
+                      v-if="item.location_type || item.fix_mode" 
+                      :class="['text-[9px] px-1.5 py-0.2 rounded border font-mono font-normal',
+                        (item.location_type || item.fix_mode) === 'GPS' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' :
+                        (item.location_type || item.fix_mode) === 'WIFI' ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30' :
+                        'bg-amber-500/20 text-amber-300 border-amber-500/30']"
+                    >
+                      {{ item.location_type || item.fix_mode }}
+                    </span>
                     <span v-if="currentTrackStep === idx" class="text-[9px] px-1.5 py-0.2 bg-blue-500/30 text-blue-300 rounded border border-blue-500/40">播放中</span>
                   </div>
                   <div class="text-[10px] text-slate-400 mt-0.5">{{ item.address }}</div>
@@ -995,13 +1263,12 @@ watch(playbackSpeed, () => {
 
     <!-- ===== TAB 3: 📊 30天活动热力与生活圈视图 ===== -->
     <div v-else-if="activeTab === 'heatmap'" class="grid grid-cols-12 gap-5 flex-1">
-      <!-- 左侧 8 列: AMap.HeatMap 活动热力图地图 -->
       <div class="col-span-12 lg:col-span-8 flex flex-col space-y-4">
         <div class="glass-panel rounded-2xl overflow-hidden border border-slate-800 flex-1 min-h-[480px] relative flex flex-col">
           <div class="p-3 border-b border-slate-800 flex items-center justify-between bg-slate-900/80 backdrop-blur-md z-10">
             <div class="flex items-center space-x-3">
               <Flame :size="16" class="text-amber-400" />
-              <span class="text-xs font-bold text-slate-200">高德活动热力密度图层 (AMap.HeatMap)</span>
+              <span class="text-xs font-bold text-slate-200">活动热力密度图层</span>
             </div>
 
             <div class="flex items-center space-x-1 bg-slate-950/80 p-0.5 rounded-lg border border-slate-800">
@@ -1026,7 +1293,7 @@ watch(playbackSpeed, () => {
               :selectedImei="device.imei"
               :zoomLevel="14"
               :showTrack="false"
-              :showHeatmap="true"
+              :showHeatmap="heatmapDataPoints.length > 0"
               :heatmapPoints="heatmapDataPoints"
               :heatmapRadius="heatmapRadius"
             />
@@ -1034,57 +1301,30 @@ watch(playbackSpeed, () => {
         </div>
       </div>
 
-      <!-- 右侧 4 列: 常去地标 TOP4 与生活圈评估看板 -->
       <div class="col-span-12 lg:col-span-4 flex flex-col space-y-4">
         <div class="glass-panel rounded-2xl p-5 border border-slate-800 space-y-3">
           <h3 class="text-xs font-bold text-slate-200 flex items-center space-x-2 border-b border-slate-800 pb-2">
             <Flame :size="16" class="text-amber-400" />
-            <span>长者常去地标驻留 TOP 4 榜单</span>
+            <span>长者常去地标驻留 TOP 榜单</span>
           </h3>
 
-          <div class="space-y-2.5 font-mono text-xs">
-            <div class="bg-slate-900/80 p-3 rounded-xl border border-slate-800 flex items-center justify-between">
+          <div v-if="topLandmarks.length === 0" class="text-xs text-slate-500 py-6 text-center font-mono">
+            暂无常驻地标与热力分布数据
+          </div>
+          <div v-else class="space-y-2.5 font-mono text-xs">
+            <div 
+              v-for="item in topLandmarks"
+              :key="item.rank"
+              class="bg-slate-900/80 p-3 rounded-xl border border-slate-800 flex items-center justify-between"
+            >
               <div class="flex items-center space-x-2">
-                <span class="w-5 h-5 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold text-[10px]">1</span>
+                <span class="w-5 h-5 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold text-[10px]">{{ item.rank }}</span>
                 <div>
-                  <div class="font-bold text-white">安老院/居所核心区</div>
-                  <div class="text-[10px] text-slate-400">荃湾街市街安老院</div>
+                  <div class="font-bold text-white">{{ item.name }}</div>
+                  <div class="text-[10px] text-slate-400">{{ item.address }}</div>
                 </div>
               </div>
-              <span class="text-amber-400 font-bold">驻留 68%</span>
-            </div>
-
-            <div class="bg-slate-900/80 p-3 rounded-xl border border-slate-800 flex items-center justify-between">
-              <div class="flex items-center space-x-2">
-                <span class="w-5 h-5 rounded-full bg-cyan-500/20 text-cyan-400 flex items-center justify-center font-bold text-[10px]">2</span>
-                <div>
-                  <div class="font-bold text-white">社区菜市场/超市</div>
-                  <div class="text-[10px] text-slate-400">荃湾街市街 55 号</div>
-                </div>
-              </div>
-              <span class="text-cyan-400 font-bold">驻留 18%</span>
-            </div>
-
-            <div class="bg-slate-900/80 p-3 rounded-xl border border-slate-800 flex items-center justify-between">
-              <div class="flex items-center space-x-2">
-                <span class="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold text-[10px]">3</span>
-                <div>
-                  <div class="font-bold text-white">社区体育公园</div>
-                  <div class="text-[10px] text-slate-400">荃湾海滨公园</div>
-                </div>
-              </div>
-              <span class="text-emerald-400 font-bold">驻留 9%</span>
-            </div>
-
-            <div class="bg-slate-900/80 p-3 rounded-xl border border-slate-800 flex items-center justify-between">
-              <div class="flex items-center space-x-2">
-                <span class="w-5 h-5 rounded-full bg-slate-800 text-slate-400 flex items-center justify-center font-bold text-[10px]">4</span>
-                <div>
-                  <div class="font-bold text-slate-300">健康服务中心</div>
-                  <div class="text-[10px] text-slate-400">葵涌社区健康中心</div>
-                </div>
-              </div>
-              <span class="text-slate-400 font-bold">驻留 5%</span>
+              <span class="text-amber-400 font-bold">驻留 {{ item.percentage }}%</span>
             </div>
           </div>
         </div>
@@ -1101,14 +1341,14 @@ watch(playbackSpeed, () => {
               <span class="text-emerald-400">高度规律 🟢</span>
             </div>
             <p class="text-[11px] text-slate-300 leading-relaxed font-sans">
-              长者 30 天日常活动半径保持在离家 1.8km 安全圈范围内，活动轨迹高度规律，无偏僻危险区域落单记录。
+              长者日常活动半径保持在离家安全圈范围内，活动轨迹高度规律，无偏僻危险区域落单记录。
             </p>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- ===== 解法 3: 调阅全量健康体征研判档案 模态框/大抽屉 ===== -->
+    <!-- ===== 调阅全量健康体征研判档案 模态框/大抽屉 ===== -->
     <div v-if="showFullReportModal" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-6">
       <div class="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-5xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
         <div class="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/50">
@@ -1145,10 +1385,10 @@ watch(playbackSpeed, () => {
             </div>
             <div class="col-span-9 space-y-1 text-slate-300">
               <div class="font-bold text-indigo-200 text-sm font-sans mb-1">长者近 30 天体征健康全貌诊断要点:</div>
-              <div>· 心率静息均值 <strong class="text-white">76 bpm</strong>，最高峰值 <strong class="text-red-400">118 bpm</strong>（触发紧急 SOS 求救）；</div>
-              <div>· 参考血压近期略有升高，平均收缩压 <strong class="text-amber-300">128 mmHg</strong>，建议关注防范高血压事件；</div>
-              <div>· 血氧饱和度稳定于 <strong class="text-cyan-300">97-99%</strong>，呼吸功能极佳；表体温度均匀保持在 <strong class="text-emerald-300">36.6°C</strong> 正常区间；</div>
-              <div>· 习惯出行活动范围处于荃湾/葵涌社区安全圈内，无走失越界隐患。</div>
+              <div>· 静息心率上报: <strong class="text-white">{{ isInvalidHealthVal(device.last_heart_rate) ? '暂无数据' : `${device.last_heart_rate} bpm` }}</strong>；</div>
+              <div>· 参考血压上报: <strong class="text-amber-300">{{ isInvalidHealthVal(device.bp) ? '暂无数据' : device.bp }}</strong>；</div>
+              <div>· 血氧饱和度: <strong class="text-cyan-300">{{ isInvalidHealthVal(device.spo2) ? '暂无数据' : `${device.spo2}%` }}</strong>；表体温度: <strong class="text-emerald-300">{{ isInvalidHealthVal(device.temperature) ? '暂无数据' : `${device.temperature}°C` }}</strong>；</div>
+              <div>· 历史告警工单记录: <strong class="text-rose-400">{{ alarmList.length }} 次</strong>。</div>
             </div>
           </div>
 
@@ -1156,20 +1396,20 @@ watch(playbackSpeed, () => {
             <div class="bg-slate-950/60 p-4 rounded-2xl border border-slate-800 space-y-3">
               <h4 class="font-bold text-slate-200 flex items-center space-x-2 text-xs font-sans">
                 <Heart :size="16" class="text-rose-400" />
-                <span>1. 心率与血压全量对比数据</span>
+                <span>1. 心率与血压数据汇总</span>
               </h4>
               <div class="grid grid-cols-3 gap-2 text-center text-[11px]">
                 <div class="bg-slate-900 p-2 rounded-xl border border-slate-800">
-                  <span class="text-slate-400 block text-[10px]">最高心率</span>
-                  <span class="text-red-400 font-bold text-sm">118 bpm</span>
+                  <span class="text-slate-400 block text-[10px]">最新心率</span>
+                  <span class="text-red-400 font-bold text-sm">{{ isInvalidHealthVal(device.last_heart_rate) ? '--' : device.last_heart_rate }}</span>
                 </div>
                 <div class="bg-slate-900 p-2 rounded-xl border border-slate-800">
                   <span class="text-slate-400 block text-[10px]">静息心率均值</span>
-                  <span class="text-emerald-400 font-bold text-sm">74 bpm</span>
+                  <span class="text-emerald-400 font-bold text-sm">{{ vitalsData.hr.length > 0 ? Math.round(vitalsData.hr.reduce((a,b)=>a+b,0)/vitalsData.hr.length) : '--' }}</span>
                 </div>
                 <div class="bg-slate-900 p-2 rounded-xl border border-slate-800">
-                  <span class="text-slate-400 block text-[10px]">血压极值</span>
-                  <span class="text-amber-300 font-bold text-sm">142/92</span>
+                  <span class="text-slate-400 block text-[10px]">参考血压</span>
+                  <span class="text-amber-300 font-bold text-sm">{{ isInvalidHealthVal(device.bp) ? '--' : device.bp }}</span>
                 </div>
               </div>
             </div>
@@ -1181,16 +1421,16 @@ watch(playbackSpeed, () => {
               </h4>
               <div class="grid grid-cols-3 gap-2 text-center text-[11px]">
                 <div class="bg-slate-900 p-2 rounded-xl border border-slate-800">
-                  <span class="text-slate-400 block text-[10px]">血氧均值</span>
-                  <span class="text-cyan-300 font-bold text-sm">98.5 %</span>
+                  <span class="text-slate-400 block text-[10px]">血氧值</span>
+                  <span class="text-cyan-300 font-bold text-sm">{{ isInvalidHealthVal(device.spo2) ? '--' : `${device.spo2}%` }}</span>
                 </div>
                 <div class="bg-slate-900 p-2 rounded-xl border border-slate-800">
-                  <span class="text-slate-400 block text-[10px]">最低血氧</span>
-                  <span class="text-amber-400 font-bold text-sm">94 %</span>
+                  <span class="text-slate-400 block text-[10px]">体温值</span>
+                  <span class="text-emerald-300 font-bold text-sm">{{ isInvalidHealthVal(device.temperature) ? '--' : `${device.temperature}°C` }}</span>
                 </div>
                 <div class="bg-slate-900 p-2 rounded-xl border border-slate-800">
-                  <span class="text-slate-400 block text-[10px]">平均体温</span>
-                  <span class="text-emerald-300 font-bold text-sm">36.6 °C</span>
+                  <span class="text-slate-400 block text-[10px]">今日计步</span>
+                  <span class="text-indigo-300 font-bold text-sm">{{ isInvalidHealthVal(device.steps) ? '--' : device.steps }}</span>
                 </div>
               </div>
             </div>
@@ -1199,7 +1439,7 @@ watch(playbackSpeed, () => {
           <div class="pt-2 border-t border-slate-800 flex items-center justify-between text-slate-400 text-xs">
             <div>报告生成时间: {{ new Date().toLocaleString() }}</div>
             <div class="flex items-center space-x-4">
-              <span>社区主治医师: <strong class="text-white">林医生 (已审核)</strong></span>
+              <span>主治医师: <strong class="text-white">林医生 (已审核)</strong></span>
               <span>安防网格员: <strong class="text-white">陈专员</strong></span>
             </div>
           </div>

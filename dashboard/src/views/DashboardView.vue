@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref, computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useDashboardStore } from '../store/dashboard'
 import AmapDashboard from '../components/AmapDashboard.vue'
@@ -22,15 +22,29 @@ import {
   Battery,
   Heart,
   Bell,
-  Check
+  Check,
+  ChevronRight,
+  ChevronDown
 } from 'lucide-vue-next'
 
 const store = useDashboardStore()
 const filterStatus = ref<'all' | 'online' | 'sos_alert' | 'offline'>('all')
-const alarmCategoryFilter = ref<'all' | 'SOS' | 'FALL' | 'VITAL' | 'GEOFENCE'>('all')
+// 默认选定 SOS 紧急求救 Tab (去掉 "全部" Tab)
+const alarmCategoryFilter = ref<'SOS' | 'FALL' | 'VITAL' | 'GEOFENCE'>('SOS')
 const searchQuery = ref('')
 const commandStatus = ref<'idle' | 'sending' | 'success' | 'error'>('idle')
 const commandMsg = ref('')
+
+// 辖区折叠/展开状态记录 (默认全部收缩)
+const expandedDistricts = ref<Record<string, boolean>>({})
+
+const toggleDistrict = (dist: string) => {
+  expandedDistricts.value[dist] = !expandedDistricts.value[dist]
+}
+
+const isDistrictExpanded = (dist: string) => {
+  return !!expandedDistricts.value[dist]
+}
 
 let timer: any = null
 
@@ -51,11 +65,90 @@ const handleStatusFilter = (status: 'all' | 'online' | 'sos_alert' | 'offline') 
   filterStatus.value = status
 }
 
-const filteredAlarmOrders = () => {
-  return store.alarmOrders.filter(a => {
-    if (alarmCategoryFilter.value === 'all') return true
-    return a.category === alarmCategoryFilter.value
-  })
+// 容错与全覆盖的告警分类映射器
+const getAlarmCat = (alarm: any): 'SOS' | 'FALL' | 'VITAL' | 'GEOFENCE' => {
+  if (alarm && (alarm.category === 'SOS' || alarm.category === 'FALL' || alarm.category === 'VITAL' || alarm.category === 'GEOFENCE')) {
+    return alarm.category
+  }
+  const type = alarm?.alert_type || ''
+  if (type.includes('跌倒') || type.includes('摔倒') || type.includes('姿态')) return 'FALL'
+  if (type.includes('心率') || type.includes('体征') || type.includes('发烧')) return 'VITAL'
+  if (type.includes('越界') || type.includes('围栏')) return 'GEOFENCE'
+  return 'SOS'
+}
+
+// 主色调视觉样式映射器 (实现 Tab、标题、卡片边框与定位按钮全颜色统一)
+const getCategoryTheme = (cat: 'SOS' | 'FALL' | 'VITAL' | 'GEOFENCE') => {
+  if (cat === 'SOS') {
+    return {
+      tabActive: 'bg-red-600 text-white shadow-lg shadow-red-600/30 border-red-400/50',
+      tabInactive: 'text-red-400 hover:text-white hover:bg-red-950/30',
+      cardBorder: 'bg-red-950/40 border-red-500/50 hover:border-red-400',
+      badge: 'bg-red-500/20 text-red-300 border-red-500/40 animate-pulse',
+      button: 'bg-red-600 hover:bg-red-500 text-white shadow-red-600/30',
+      headerTitle: '实时 SOS 紧急求救'
+    }
+  }
+  if (cat === 'FALL') {
+    return {
+      tabActive: 'bg-orange-600 text-white shadow-lg shadow-orange-600/30 border-orange-400/50',
+      tabInactive: 'text-orange-400 hover:text-white hover:bg-orange-950/30',
+      cardBorder: 'bg-orange-950/40 border-orange-500/50 hover:border-orange-400',
+      badge: 'bg-orange-500/20 text-orange-300 border-orange-500/40',
+      button: 'bg-orange-600 hover:bg-orange-500 text-white shadow-orange-600/30',
+      headerTitle: '实时跌倒姿态异常'
+    }
+  }
+  if (cat === 'VITAL') {
+    return {
+      tabActive: 'bg-pink-600 text-white shadow-lg shadow-pink-600/30 border-pink-400/50',
+      tabInactive: 'text-pink-400 hover:text-white hover:bg-pink-950/30',
+      cardBorder: 'bg-pink-950/40 border-pink-500/50 hover:border-pink-400',
+      badge: 'bg-pink-500/20 text-pink-300 border-pink-500/40',
+      button: 'bg-pink-600 hover:bg-pink-500 text-white shadow-pink-600/30',
+      headerTitle: '实时体征健康风险'
+    }
+  }
+  return {
+    tabActive: 'bg-cyan-600 text-white shadow-lg shadow-cyan-600/30 border-cyan-400/50',
+    tabInactive: 'text-cyan-400 hover:text-white hover:bg-cyan-950/30',
+    cardBorder: 'bg-cyan-950/40 border-cyan-500/50 hover:border-cyan-400',
+    badge: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40',
+    button: 'bg-cyan-600 hover:bg-cyan-500 text-white shadow-cyan-600/30',
+    headerTitle: '实时电子围栏出界'
+  }
+}
+
+const countSOS = computed(() => store.alarmOrders.filter(a => getAlarmCat(a) === 'SOS').length)
+const countFALL = computed(() => store.alarmOrders.filter(a => getAlarmCat(a) === 'FALL').length)
+const countVITAL = computed(() => store.alarmOrders.filter(a => getAlarmCat(a) === 'VITAL').length)
+const countGEOFENCE = computed(() => store.alarmOrders.filter(a => getAlarmCat(a) === 'GEOFENCE').length)
+
+const criticalCount = computed(() => store.alarmOrders.filter(a => {
+  const cat = getAlarmCat(a)
+  return cat === 'SOS' || cat === 'FALL'
+}).length)
+
+const warningCount = computed(() => store.alarmOrders.filter(a => {
+  const cat = getAlarmCat(a)
+  return cat === 'VITAL' || cat === 'GEOFENCE'
+}).length)
+
+// 按时间正序 (较老的数据优先展示，最早触发的排在最前 #01)
+const filteredAlarmOrders = computed(() => {
+  const list = store.alarmOrders.filter(a => getAlarmCat(a) === alarmCategoryFilter.value)
+  return list.slice().sort((a, b) => a.id - b.id)
+})
+
+// 获取设备列表中告警态设备的精细化 Badge 标签
+const getDeviceAlarmBadge = (imei: string) => {
+  const alarm = store.alarmOrders.find(a => a.device_imei === imei)
+  const cat = alarm ? getAlarmCat(alarm) : 'SOS'
+  if (cat === 'SOS') return { text: 'SOS求救', style: 'bg-red-600 text-white animate-pulse' }
+  if (cat === 'FALL') return { text: '跌倒告警', style: 'bg-orange-600 text-white font-bold' }
+  if (cat === 'VITAL') return { text: '体征异常', style: 'bg-pink-600 text-white font-bold' }
+  if (cat === 'GEOFENCE') return { text: '围栏越界', style: 'bg-cyan-600 text-white font-bold' }
+  return { text: '告警中', style: 'bg-red-600 text-white' }
 }
 
 const sendFindCommand = async (imei: string) => {
@@ -80,6 +173,120 @@ const filteredDevices = () => {
   })
 }
 
+// 解析设备所属城市
+const getDeviceCity = (dev: any): string => {
+  if (dev.city) return dev.city
+  const lat = Number(dev.last_latitude)
+  const lon = Number(dev.last_longitude)
+  if ((lat >= 22.0 && lat <= 22.6 && lon >= 113.8 && lon <= 114.5) || dev.imei === '1234567890') {
+    return '香港'
+  }
+  const raw = (dev.owner_name || '') + (dev.address || '') + (dev.device_name || '')
+  if (raw.includes('香港') || raw.includes('葵涌') || raw.includes('葵青') || raw.includes('荃湾') || raw.includes('945M')) {
+    return '香港'
+  }
+  return '成都市'
+}
+
+// 展开/收缩控制 (一级城市默认展开)
+const expandedCities = ref<Set<string>>(new Set(['成都市', '香港']))
+
+const isCityExpanded = (city: string) => expandedCities.value.has(city)
+const toggleCity = (city: string) => {
+  if (expandedCities.value.has(city)) {
+    expandedCities.value.delete(city)
+  } else {
+    expandedCities.value.add(city)
+  }
+}
+
+// 解析设备所属行政区
+const getDeviceDistrict = (dev: any): string => {
+  const city = getDeviceCity(dev)
+  const raw = (dev.owner_name?.match(/\((.*?)\)/)?.[1] || '') + (dev.address || '')
+  if (city === '成都市') {
+    if (raw.includes('武侯')) return '武侯区'
+    if (raw.includes('锦江')) return '锦江区'
+    if (raw.includes('青羊')) return '青羊区'
+    if (raw.includes('高新')) return '高新区'
+    if (raw.includes('金牛')) return '金牛区'
+    if (raw.includes('成华')) return '成华区'
+    if (raw.includes('双流')) return '双流区'
+    if (raw.includes('温江')) return '温江区'
+    return '成都市辖区'
+  } else {
+    if (raw.includes('荃湾')) return '荃湾区'
+    if (raw.includes('葵涌') || raw.includes('葵青')) return '葵青区'
+    if (raw.includes('沙田')) return '沙田区'
+    if (raw.includes('油尖旺') || raw.includes('旺角') || raw.includes('尖沙咀')) return '油尖旺区'
+    if (raw.includes('深水埗') || raw.includes('长沙湾')) return '深水埗区'
+    if (raw.includes('九龙城') || raw.includes('红磡')) return '九龙城区'
+    if (raw.includes('黄大仙')) return '黄大仙区'
+    if (raw.includes('观塘') || raw.includes('九龙湾')) return '观塘区'
+    if (raw.includes('屯门')) return '屯门区'
+    if (raw.includes('元朗')) return '元朗区'
+    if (raw.includes('北角') || raw.includes('北区') || raw.includes('上水')) return '北区'
+    if (raw.includes('大埔')) return '大埔区'
+    if (raw.includes('西贡') || raw.includes('将军澳')) return '西贡区'
+    if (raw.includes('中西区') || raw.includes('中环') || raw.includes('坚尼地城')) return '中西区'
+    if (raw.includes('湾仔') || raw.includes('铜锣湾')) return '湾仔区'
+    if (raw.includes('东区')) return '东区'
+    if (raw.includes('南区') || raw.includes('香港仔')) return '南区'
+    if (raw.includes('离岛') || raw.includes('东涌')) return '离岛区'
+    return '港九新界'
+  }
+}
+
+// 三级分组：城市 → 区 → 设备
+const groupedByCity = computed(() => {
+  const devs = filteredDevices()
+  // city → district → devices
+  const cityMap = new Map<string, Map<string, any[]>>()
+
+  devs.forEach(d => {
+    const city = getDeviceCity(d)
+    const dist = getDeviceDistrict(d)
+    if (!cityMap.has(city)) cityMap.set(city, new Map())
+    const distMap = cityMap.get(city)!
+    if (!distMap.has(dist)) distMap.set(dist, [])
+    distMap.get(dist)!.push(d)
+  })
+
+  const result: { city: string; total: number; districts: { district: string; devices: any[] }[] }[] = []
+
+  // 城市顺序: 成都市优先（真实设备所在地），然后香港
+  const cityOrder = ['成都市', '香港']
+  cityOrder.forEach(city => {
+    if (!cityMap.has(city)) return
+    const distMap = cityMap.get(city)!
+    const groups: { district: string; devices: any[] }[] = []
+    distMap.forEach((deviceList, dist) => {
+      deviceList.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
+      groups.push({ district: dist, devices: deviceList })
+    })
+    groups.sort((a, b) => {
+      const aSos = a.devices.some(d => d.status === 'sos_alert') ? 1 : 0
+      const bSos = b.devices.some(d => d.status === 'sos_alert') ? 1 : 0
+      if (aSos !== bSos) return bSos - aSos
+      return b.devices.length - a.devices.length
+    })
+    result.push({ city, total: Array.from(distMap.values()).reduce((s, v) => s + v.length, 0), districts: groups })
+  })
+
+  // 将其余未在 cityOrder 中的城市追加
+  cityMap.forEach((distMap, city) => {
+    if (cityOrder.includes(city)) return
+    const groups: { district: string; devices: any[] }[] = []
+    distMap.forEach((deviceList, dist) => {
+      deviceList.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
+      groups.push({ district: dist, devices: deviceList })
+    })
+    result.push({ city, total: Array.from(distMap.values()).reduce((s, v) => s + v.length, 0), districts: groups })
+  })
+
+  return result
+})
+
 const formatTime = (ts: number) => {
   if (!ts) return '--'
   const d = new Date(ts * 1000)
@@ -96,7 +303,7 @@ const formatLocationStatus = (ts: number) => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col p-4 space-y-4 relative">
+  <div class="h-screen bg-slate-950 text-slate-100 flex flex-col p-3 md:p-4 space-y-3 relative overflow-hidden">
     
     <!-- 全局 Toast 提示通知弹窗 -->
     <div v-if="store.toastMessage" class="fixed top-6 left-1/2 -translate-x-1/2 z-50 bg-amber-500 text-slate-950 font-black px-6 py-2.5 rounded-2xl shadow-2xl backdrop-blur-md border border-amber-300 text-xs md:text-sm flex items-center space-x-2 animate-bounce">
@@ -104,7 +311,7 @@ const formatLocationStatus = (ts: number) => {
     </div>
 
     <!-- Header 指挥中心大屏顶部导航栏 -->
-    <header class="glass-panel px-6 py-3.5 rounded-2xl flex items-center justify-between border-slate-800 shadow-2xl">
+    <header class="glass-panel px-5 py-3 rounded-2xl flex items-center justify-between border-slate-800 shadow-2xl flex-shrink-0">
       <div class="flex items-center space-x-3">
         <div class="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
           <Activity :size="24" class="animate-pulse" />
@@ -164,42 +371,42 @@ const formatLocationStatus = (ts: number) => {
       </div>
     </header>
 
-    <!-- 主板区：KPI 统计栏 + 三栏响应式布局 -->
-    <div class="grid grid-cols-12 gap-4 flex-1">
+    <!-- 主板区：KPI 统计栏 + 三栏响应式全屏自适应布局 (min-h-0 overflow-hidden 撑满视口) -->
+    <div class="grid grid-cols-12 gap-3.5 flex-1 min-h-0 overflow-hidden">
       
       <!-- ===== 左栏 (3 列): KPI 指示牌与设备检索 ===== -->
-      <div class="col-span-12 lg:col-span-3 flex flex-col space-y-4">
+      <div class="col-span-12 lg:col-span-3 flex flex-col space-y-3 h-full min-h-0 overflow-hidden">
         <!-- 4 KPI 统计网格 -->
-        <div class="grid grid-cols-2 gap-3">
-          <div class="glass-panel p-3.5 rounded-2xl flex flex-col justify-between">
+        <div class="grid grid-cols-2 gap-2.5 flex-shrink-0">
+          <div class="glass-panel p-3 rounded-2xl flex flex-col justify-between">
             <span class="text-xs font-medium text-slate-400">管控设备总数</span>
             <div class="text-2xl font-black text-white mt-1 font-mono">{{ store.totalCount }} <span class="text-xs font-normal text-slate-500">台</span></div>
           </div>
-          <div class="glass-panel p-3.5 rounded-2xl flex flex-col justify-between">
+          <div class="glass-panel p-3 rounded-2xl flex flex-col justify-between">
             <span class="text-xs font-medium text-slate-400">设备在线率</span>
             <div class="text-2xl font-black text-emerald-400 mt-1 font-mono">
               {{ store.onlineRate }}%
             </div>
           </div>
-          <div class="glass-panel-danger p-3.5 rounded-2xl flex flex-col justify-between border-red-500/40">
+          <div class="glass-panel-danger p-3 rounded-2xl flex flex-col justify-between border-red-500/40">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-red-300">紧急救援 (SOS/跌倒)</span>
               <ShieldAlert :size="16" class="text-red-400 animate-bounce" />
             </div>
-            <div class="text-2xl font-black text-red-400 mt-1 font-mono">{{ store.criticalAlarmsCount }} <span class="text-xs font-normal text-red-300">起</span></div>
+            <div class="text-2xl font-black text-red-400 mt-1 font-mono">{{ criticalCount }} <span class="text-xs font-normal text-red-300">起</span></div>
           </div>
-          <div class="glass-panel p-3.5 rounded-2xl flex flex-col justify-between border-amber-500/30">
+          <div class="glass-panel p-3 rounded-2xl flex flex-col justify-between border-amber-500/30">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-amber-300">防护预警 (体征/围栏)</span>
               <Activity :size="16" class="text-amber-400" />
             </div>
-            <div class="text-2xl font-black text-amber-400 mt-1 font-mono">{{ store.warningAlarmsCount }} <span class="text-xs font-normal text-amber-300">起</span></div>
+            <div class="text-2xl font-black text-amber-400 mt-1 font-mono">{{ warningCount }} <span class="text-xs font-normal text-amber-300">起</span></div>
           </div>
         </div>
 
-        <!-- 设备列表与过滤面板 -->
-        <div class="glass-panel rounded-2xl p-4 flex-1 flex flex-col min-h-[500px]">
-          <div class="flex items-center justify-between mb-3">
+        <!-- 设备列表与过滤面板 (flex-1 min-h-0 内部高度自适应) -->
+        <div class="glass-panel rounded-2xl p-3.5 flex-1 flex flex-col min-h-0 overflow-hidden border border-slate-800">
+          <div class="flex items-center justify-between mb-2.5 flex-shrink-0">
             <h3 class="text-sm font-bold text-slate-200 flex items-center space-x-2">
               <span>辖区设备列表</span>
               <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 font-mono">{{ filteredDevices().length }}</span>
@@ -208,7 +415,7 @@ const formatLocationStatus = (ts: number) => {
           </div>
 
           <!-- 搜索与状态 Filter -->
-          <div class="space-y-2 mb-3">
+          <div class="space-y-2 mb-2.5 flex-shrink-0">
             <div class="relative">
               <Search :size="14" class="absolute left-3 top-2.5 text-slate-500" />
               <input 
@@ -247,42 +454,90 @@ const formatLocationStatus = (ts: number) => {
             </div>
           </div>
 
-          <!-- 设备滚动长列表 -->
-          <div class="space-y-2 flex-1 overflow-y-auto max-h-[480px] pr-1">
-            <div 
-              v-for="dev in filteredDevices()" 
-              :key="dev.imei"
-              @click="store.selectDevice(dev.imei)"
-              :class="['p-3 rounded-xl border transition cursor-pointer flex items-center justify-between',
-                store.selectedImei === dev.imei ? 'bg-cyan-950/40 border-cyan-500/60 shadow-lg shadow-cyan-500/10' :
-                dev.status === 'sos_alert' ? 'bg-red-950/20 border-red-500/40 hover:bg-red-900/20' : 'bg-slate-900/60 border-slate-800/80 hover:bg-slate-800/60']"
-            >
-              <div class="flex items-center space-x-3">
-                <div :class="['w-2.5 h-2.5 rounded-full flex-shrink-0',
-                  dev.status === 'sos_alert' ? 'bg-red-500 animate-ping' :
-                  dev.status === 'online' ? 'bg-emerald-400 shadow-sm shadow-emerald-400/50' : 'bg-slate-600']"
-                ></div>
-                <div>
-                  <div class="text-xs font-bold text-slate-100 flex items-center space-x-1.5">
-                    <span>{{ dev.owner_name }}</span>
-                    <span v-if="dev.status === 'sos_alert'" class="text-[9px] bg-red-600 text-white px-1 rounded font-mono animate-pulse">SOS</span>
+          <!-- 设备按城市 → 区域分组列表 -->
+          <div class="space-y-2 flex-1 overflow-y-auto min-h-0 pr-1 custom-scrollbar">
+            <template v-for="cityGroup in groupedByCity" :key="cityGroup.city">
+              <!-- 城市一级收缩/展开 Header -->
+              <div 
+                @click="toggleCity(cityGroup.city)"
+                class="flex items-center justify-between px-2.5 py-1.5 rounded-xl cursor-pointer hover:bg-slate-800/80 transition border border-slate-800 select-none my-1 backdrop-blur-md"
+                :class="cityGroup.city === '成都市' ? 'bg-emerald-950/40 border-emerald-900/60' : 'bg-blue-950/40 border-blue-900/60'"
+              >
+                <div class="flex items-center space-x-2">
+                  <ChevronRight v-if="!isCityExpanded(cityGroup.city)" :size="15" class="text-slate-400" />
+                  <ChevronDown v-else :size="15" class="text-cyan-400" />
+                  <span class="text-xs font-black tracking-wider uppercase px-2 py-0.5 rounded-md"
+                    :class="cityGroup.city === '成都市' ? 'bg-emerald-900/70 text-emerald-300 border border-emerald-700/60' : 'bg-blue-900/70 text-blue-300 border border-blue-700/60'"
+                  >
+                    {{ cityGroup.city === '成都市' ? '🏙 成都市' : '🌃 香港' }}
+                  </span>
+                </div>
+                <span class="text-[11px] font-mono text-slate-400 bg-slate-900 px-2 py-0.5 rounded-full border border-slate-800">
+                  {{ cityGroup.total }} 台
+                </span>
+              </div>
+
+              <!-- 城市下一级区列表 (按城市展开状态渲染) -->
+              <div v-if="isCityExpanded(cityGroup.city)" class="space-y-2 pl-1 transition-all">
+                <div v-for="group in cityGroup.districts" :key="cityGroup.city + group.district" class="space-y-1.5">
+                  <!-- 区域 Header -->
+                  <div
+                    @click="toggleDistrict(cityGroup.city + group.district)"
+                    class="flex items-center justify-between text-[11px] font-bold text-slate-200 bg-slate-900/90 hover:bg-slate-800/90 px-3 py-2 rounded-xl border border-slate-800 cursor-pointer sticky top-0 backdrop-blur-md z-10 transition select-none"
+                  >
+                    <span class="flex items-center space-x-2 text-cyan-300">
+                      <ChevronRight v-if="!isDistrictExpanded(cityGroup.city + group.district)" :size="14" class="text-slate-400" />
+                      <ChevronDown v-else :size="14" class="text-cyan-400" />
+                      <MapPin :size="13" class="text-cyan-400" />
+                      <span>{{ group.district }}</span>
+                    </span>
+                    <span class="text-[10px] font-mono text-slate-400 bg-slate-800 px-2 py-0.5 rounded-full border border-slate-700/50">
+                      {{ group.devices.length }} 台
+                    </span>
                   </div>
-                  <div class="text-[10px] text-slate-400 font-mono mt-0.5 truncate max-w-[140px]">{{ dev.address }}</div>
+
+                  <!-- 区域内设备卡片 -->
+                  <div v-if="isDistrictExpanded(cityGroup.city + group.district)" class="space-y-1.5 pl-1">
+                    <div
+                      v-for="dev in group.devices"
+                      :key="dev.imei"
+                      @click="store.selectDevice(dev.imei)"
+                      :class="['p-2.5 rounded-xl border transition cursor-pointer flex items-center justify-between',
+                        store.selectedImei === dev.imei ? 'bg-cyan-950/40 border-cyan-500/60 shadow-lg shadow-cyan-500/10' :
+                        dev.status === 'sos_alert' ? 'bg-red-950/20 border-red-500/40 hover:bg-red-900/20' : 'bg-slate-900/60 border-slate-800/80 hover:bg-slate-800/60']"
+                    >
+                    <div class="flex items-center space-x-2.5">
+                      <div :class="['w-2.5 h-2.5 rounded-full flex-shrink-0',
+                        dev.status === 'sos_alert' ? 'bg-red-500 animate-ping' :
+                        dev.status === 'online' ? 'bg-emerald-400 shadow-sm shadow-emerald-400/50' : 'bg-slate-600']"
+                      ></div>
+                      <div>
+                        <div class="text-xs font-bold text-slate-100 flex items-center space-x-1.5">
+                          <span>{{ dev.owner_name }}</span>
+                          <span v-if="dev.status === 'sos_alert'" :class="['text-[9px] px-1.5 py-0.5 rounded font-mono font-bold flex items-center space-x-1', getDeviceAlarmBadge(dev.imei).style]">
+                            {{ getDeviceAlarmBadge(dev.imei).text }}
+                          </span>
+                        </div>
+                        <div class="text-[10px] text-slate-400 font-mono mt-0.5 leading-snug break-all">{{ dev.address }}</div>
+                      </div>
+                    </div>
+                    <div class="text-right font-mono">
+                      <div class="text-xs text-slate-300">{{ dev.last_heart_rate ? dev.last_heart_rate + ' bpm' : '--' }}</div>
+                      <div class="text-[10px] text-slate-500">{{ formatTime(dev.updated_at) }}</div>
+                    </div>
+                  </div>
                 </div>
               </div>
-              <div class="text-right font-mono">
-                <div class="text-xs text-slate-300">{{ dev.last_heart_rate ? dev.last_heart_rate + ' bpm' : '--' }}</div>
-                <div class="text-[10px] text-slate-500">{{ formatTime(dev.updated_at) }}</div>
-              </div>
             </div>
-          </div>
+          </template>
+        </div>
         </div>
       </div>
 
-      <!-- ===== 中栏 (6 列): 高德地图大屏与选中设备控制 ===== -->
-      <div class="col-span-12 lg:col-span-6 flex flex-col space-y-4">
-        <!-- 高德地图组件 (地图数据与分类 Tab 同步联动过滤，@reset-view 清空选中状态) -->
-        <div class="flex-1 min-h-[480px]">
+      <!-- ===== 中栏 (6 列): 高德地图大屏与选中设备控制 (h-full min-h-0 高度填充) ===== -->
+      <div class="col-span-12 lg:col-span-6 flex flex-col space-y-3 h-full min-h-0 overflow-hidden">
+        <!-- 高德地图组件 (flex-1 min-h-0 地图高度自适应) -->
+        <div class="flex-1 min-h-0 rounded-2xl overflow-hidden border border-slate-800">
           <AmapDashboard 
             :devices="filteredDevices()" 
             :selectedImei="store.selectedImei"
@@ -291,144 +546,141 @@ const formatLocationStatus = (ts: number) => {
           />
         </div>
 
-        <!-- 当前选中设备卡片与控制下发盘 (只在选中某设备时展示，默认首页空选不挤占空间) -->
-        <div v-if="store.selectedDevice" class="glass-panel rounded-2xl p-4 border border-slate-800 flex items-center justify-between">
-          <div class="flex items-center space-x-4">
-            <div class="w-12 h-12 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 font-extrabold text-lg">
+        <!-- 当前选中设备卡片与控制下发盘 (地址与定位状态同行，高度最小化，地址全量完整展示不截断) -->
+        <div v-if="store.selectedDevice" class="glass-panel rounded-2xl p-2 px-3 border border-slate-800 flex items-center justify-between gap-3 flex-shrink-0">
+          <div class="flex items-center space-x-2.5 min-w-0 flex-1">
+            <div class="w-9 h-9 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 font-black text-sm flex-shrink-0">
               {{ store.selectedDevice.owner_name.slice(0, 1) }}
             </div>
-            <div>
-              <div class="flex items-center space-x-2">
-                <span class="font-bold text-slate-100 text-sm">{{ store.selectedDevice.owner_name }}</span>
-                <span :class="['px-2 py-0.5 rounded-full text-[10px] font-bold',
+            <div class="min-w-0 flex-1">
+              <!-- 单行/多行智能自适应：姓名、告警态、心率、电量、定位状态 Pill、地址 同行连写无省号截断 -->
+              <div class="flex items-center space-x-2 flex-wrap gap-y-1 font-mono text-xs">
+                <span class="font-extrabold text-slate-100 text-sm whitespace-nowrap">{{ store.selectedDevice.owner_name }}</span>
+                <span :class="['px-2 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap',
                   store.selectedDevice.status === 'sos_alert' ? 'bg-red-500/20 text-red-400 border border-red-500/30' :
                   store.selectedDevice.status === 'online' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' :
                   'bg-slate-800 text-slate-400']"
                 >
                   {{ store.selectedDevice.status === 'sos_alert' ? 'SOS 告警中' : store.selectedDevice.status === 'online' ? '在线' : '离线' }}
                 </span>
-              </div>
-              <div class="text-xs text-slate-400 flex items-center space-x-3 mt-1 font-mono">
-                <span class="flex items-center space-x-1"><Heart :size="12" class="text-rose-400" /> <span>{{ store.selectedDevice.last_heart_rate || '--' }} bpm</span></span>
-                <span class="flex items-center space-x-1"><Battery :size="12" class="text-amber-400" /> <span>{{ store.selectedDevice.battery }}%</span></span>
-                <span class="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-cyan-300 font-bold">
+                <span class="flex items-center space-x-1 text-slate-300 font-bold whitespace-nowrap">
+                  <Heart :size="12" class="text-rose-400" />
+                  <span>{{ store.selectedDevice.last_heart_rate || '--' }} bpm</span>
+                </span>
+                <span class="flex items-center space-x-1 text-slate-300 font-bold whitespace-nowrap">
+                  <Battery :size="12" class="text-amber-400" />
+                  <span>{{ store.selectedDevice.battery }}%</span>
+                </span>
+                <span class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-cyan-300 font-bold whitespace-nowrap">
                   {{ formatLocationStatus(store.selectedDevice.updated_at) }}
                 </span>
-                <span class="flex items-center space-x-1"><MapPin :size="12" class="text-cyan-400" /> <span class="truncate max-w-[160px]">{{ store.selectedDevice.address }}</span></span>
+                <!-- 地址全量无死角展示，不使用 truncate 或 省略号 -->
+                <span class="text-xs font-mono text-slate-300 flex items-center space-x-1">
+                  <MapPin :size="12" class="text-cyan-400 flex-shrink-0" />
+                  <span class="font-medium text-slate-200 leading-snug">
+                    {{ store.selectedDevice.address }}
+                  </span>
+                </span>
               </div>
             </div>
           </div>
 
-          <!-- 指令与详情跳转按钮组 -->
-          <div class="flex items-center space-x-2">
+          <!-- 指令与详情跳转按钮组 (flex-shrink-0 whitespace-nowrap 绝对防止分行/缩变) -->
+          <div class="flex items-center space-x-2 flex-shrink-0">
             <button 
               @click="sendFindCommand(store.selectedDevice.imei)" 
               :disabled="commandStatus === 'sending'"
-              class="px-3.5 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5 shadow-lg shadow-cyan-600/20 active:scale-95 transition disabled:opacity-50"
+              class="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl text-xs font-extrabold flex items-center space-x-1.5 shadow-lg shadow-cyan-600/20 active:scale-95 transition disabled:opacity-50 whitespace-nowrap flex-shrink-0"
             >
               <Send :size="14" />
               <span>下发响铃</span>
             </button>
 
-            <!-- 引入跳转至设备全景健康档案详情页的按钮 -->
+            <!-- 跳转至设备详情页按钮 -->
             <RouterLink 
               :to="'/device/' + store.selectedDevice.imei"
-              class="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5 shadow-lg shadow-indigo-600/20 active:scale-95 transition"
+              class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-extrabold flex items-center space-x-1.5 shadow-lg shadow-indigo-600/20 active:scale-95 transition whitespace-nowrap flex-shrink-0"
             >
-              <span>查看健康档案详情</span>
+              <span>查看用户详情</span>
               <ExternalLink :size="14" />
             </RouterLink>
           </div>
         </div>
       </div>
 
-      <!-- ===== 右栏 (3 列): 告警中心与工单分流处理看板 (方案二：Filter Tab + 异色 Badge) ===== -->
-      <div class="col-span-12 lg:col-span-3 flex flex-col space-y-4">
-        <div class="glass-panel rounded-2xl p-4 flex-1 flex flex-col border-slate-800">
+      <!-- ===== 右栏 (3 列): 告警中心与工单分流处理看板 (h-full min-h-0 独立滚动) ===== -->
+      <div class="col-span-12 lg:col-span-3 flex flex-col space-y-3 h-full min-h-0 overflow-hidden">
+        <div class="glass-panel rounded-2xl p-3.5 flex-1 flex flex-col border border-slate-800 min-h-0 overflow-hidden">
           <!-- 告警中心 Header -->
-          <div class="flex items-center justify-between mb-3 border-b border-slate-800 pb-3">
+          <div class="flex items-center justify-between mb-2.5 border-b border-slate-800 pb-2.5 flex-shrink-0">
             <h3 class="text-sm font-extrabold text-slate-100 flex items-center space-x-2">
               <Bell :size="18" class="text-cyan-400 animate-pulse" />
-              <span>实时告警控制中心</span>
+              <span>{{ getCategoryTheme(alarmCategoryFilter).headerTitle }}</span>
             </h3>
-            <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-cyan-400 font-mono font-bold">
-              {{ store.alarmOrders.length }} 起记录
-            </span>
           </div>
 
           <!-- 告警分类 Filter Tab 快捷切页 -->
-          <div class="flex items-center space-x-1 bg-slate-900 p-1 rounded-xl border border-slate-800 text-[10px] mb-3 overflow-x-auto">
-            <button 
-              @click="alarmCategoryFilter = 'all'" 
-              :class="['px-2 py-1 rounded-lg font-bold transition flex-shrink-0', alarmCategoryFilter === 'all' ? 'bg-cyan-600 text-white shadow' : 'text-slate-400 hover:text-white']"
-            >
-              全部({{ store.alarmOrders.length }})
-            </button>
+          <div class="grid grid-cols-4 gap-1.5 bg-slate-900/90 p-1.5 rounded-2xl border border-slate-800 text-[11px] mb-2.5 shadow-inner flex-shrink-0">
             <button 
               @click="alarmCategoryFilter = 'SOS'" 
-              :class="['px-2 py-1 rounded-lg font-bold transition flex-shrink-0', alarmCategoryFilter === 'SOS' ? 'bg-red-600 text-white shadow' : 'text-red-400 hover:text-white']"
+              :class="['py-2 px-1 rounded-xl font-black transition-all duration-200 flex items-center justify-center space-x-1 whitespace-nowrap active:scale-95 border',
+                alarmCategoryFilter === 'SOS' ? getCategoryTheme('SOS').tabActive : getCategoryTheme('SOS').tabInactive + ' border-transparent']"
             >
-              🆘 SOS({{ store.alarmOrders.filter(a => a.category === 'SOS').length }})
+              <span>🆘 SOS({{ countSOS }})</span>
             </button>
             <button 
               @click="alarmCategoryFilter = 'FALL'" 
-              :class="['px-2 py-1 rounded-lg font-bold transition flex-shrink-0', alarmCategoryFilter === 'FALL' ? 'bg-orange-600 text-white shadow' : 'text-orange-400 hover:text-white']"
+              :class="['py-2 px-1 rounded-xl font-black transition-all duration-200 flex items-center justify-center space-x-1 whitespace-nowrap active:scale-95 border',
+                alarmCategoryFilter === 'FALL' ? getCategoryTheme('FALL').tabActive : getCategoryTheme('FALL').tabInactive + ' border-transparent']"
             >
-              🤸 跌倒({{ store.alarmOrders.filter(a => a.category === 'FALL').length }})
+              <span>🤸 跌倒({{ countFALL }})</span>
             </button>
             <button 
               @click="alarmCategoryFilter = 'VITAL'" 
-              :class="['px-2 py-1 rounded-lg font-bold transition flex-shrink-0', alarmCategoryFilter === 'VITAL' ? 'bg-pink-600 text-white shadow' : 'text-pink-400 hover:text-white']"
+              :class="['py-2 px-1 rounded-xl font-black transition-all duration-200 flex items-center justify-center space-x-1 whitespace-nowrap active:scale-95 border',
+                alarmCategoryFilter === 'VITAL' ? getCategoryTheme('VITAL').tabActive : getCategoryTheme('VITAL').tabInactive + ' border-transparent']"
             >
-              ❤️ 体征({{ store.alarmOrders.filter(a => a.category === 'VITAL').length }})
+              <span>❤️ 体征({{ countVITAL }})</span>
             </button>
             <button 
               @click="alarmCategoryFilter = 'GEOFENCE'" 
-              :class="['px-2 py-1 rounded-lg font-bold transition flex-shrink-0', alarmCategoryFilter === 'GEOFENCE' ? 'bg-cyan-700 text-white shadow' : 'text-cyan-400 hover:text-white']"
+              :class="['py-2 px-1 rounded-xl font-black transition-all duration-200 flex items-center justify-center space-x-1 whitespace-nowrap active:scale-95 border',
+                alarmCategoryFilter === 'GEOFENCE' ? getCategoryTheme('GEOFENCE').tabActive : getCategoryTheme('GEOFENCE').tabInactive + ' border-transparent']"
             >
-              ⭕ 围栏({{ store.alarmOrders.filter(a => a.category === 'GEOFENCE').length }})
+              <span>⭕ 围栏({{ countGEOFENCE }})</span>
             </button>
           </div>
 
-          <!-- 告警单列表 (渲染异色 Badge 标签卡片) -->
-          <div class="space-y-3 flex-1 overflow-y-auto max-h-[500px] pr-1">
+          <!-- 告警单列表 (告警时间字体样式调和统一) -->
+          <div class="space-y-2.5 flex-1 overflow-y-auto min-h-0 pr-1 custom-scrollbar">
             <div 
-              v-for="alarm in filteredAlarmOrders()" 
+              v-for="(alarm, idx) in filteredAlarmOrders" 
               :key="alarm.id"
-              :class="['rounded-xl p-3 space-y-2 border transition',
-                alarm.category === 'SOS' ? 'bg-red-950/40 border-red-500/50 hover:border-red-400' :
-                alarm.category === 'FALL' ? 'bg-orange-950/40 border-orange-500/50 hover:border-orange-400' :
-                alarm.category === 'VITAL' ? 'bg-pink-950/30 border-pink-500/40 hover:border-pink-300' :
-                'bg-cyan-950/30 border-cyan-500/40 hover:border-cyan-300']"
+              :class="['rounded-xl p-3 space-y-2 border transition', getCategoryTheme(alarmCategoryFilter).cardBorder]"
             >
               <div class="flex items-center justify-between">
-                <span :class="['text-[11px] font-extrabold px-2 py-0.5 rounded-lg border flex items-center space-x-1 font-mono',
-                  alarm.category === 'SOS' ? 'bg-red-500/20 text-red-300 border-red-500/40 animate-pulse' :
-                  alarm.category === 'FALL' ? 'bg-orange-500/20 text-orange-300 border-orange-500/40' :
-                  alarm.category === 'VITAL' ? 'bg-pink-500/20 text-pink-300 border-pink-500/40' :
-                  'bg-cyan-500/20 text-cyan-300 border-cyan-500/40']"
-                >
-                  <ShieldAlert v-if="alarm.category === 'SOS' || alarm.category === 'FALL'" :size="12" />
-                  <Activity v-else :size="12" />
-                  <span>{{ alarm.alert_type }}</span>
-                </span>
-                <span class="text-[10px] text-slate-400 font-mono">{{ alarm.trigger_time }}</span>
+                <div class="flex items-center space-x-1.5">
+                  <span class="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-slate-900/90 border border-slate-800 text-slate-300">
+                    #{{ (idx + 1) < 10 ? '0' + (idx + 1) : (idx + 1) }}
+                  </span>
+                  <span :class="['text-[11px] font-extrabold px-2 py-0.5 rounded-lg border flex items-center space-x-1 font-mono', getCategoryTheme(alarmCategoryFilter).badge]">
+                    <ShieldAlert v-if="alarmCategoryFilter === 'SOS' || alarmCategoryFilter === 'FALL'" :size="12" />
+                    <Activity v-else :size="12" />
+                    <span>{{ alarm.alert_type }}</span>
+                  </span>
+                </div>
               </div>
 
               <div class="text-xs text-slate-300 space-y-0.5 font-mono">
                 <div>长者设备: <span class="font-bold text-white">{{ store.devices.find(d => d.imei === alarm.device_imei)?.owner_name || alarm.device_imei }}</span></div>
-                <div>体征指标: <span :class="alarm.category === 'VITAL' || alarm.category === 'SOS' ? 'text-rose-400 font-bold' : 'text-slate-300'">{{ alarm.heart_rate }} bpm</span></div>
-                <div>告警坐标: <span class="text-slate-400">{{ alarm.latitude.toFixed(4) }}, {{ alarm.longitude.toFixed(4) }}</span></div>
+                <div>体征指标: <span :class="alarmCategoryFilter === 'VITAL' || alarmCategoryFilter === 'SOS' ? 'text-rose-400 font-bold' : 'text-slate-300'">{{ alarm.heart_rate }} bpm</span></div>
+                <div>告警时间: <span class="text-slate-200 font-medium">{{ alarm.trigger_time }}</span></div>
               </div>
 
               <div class="pt-1 flex items-center space-x-2">
                 <button 
                   @click="store.selectDevice(alarm.device_imei)"
-                  :class="['flex-1 py-1.5 rounded-lg text-xs font-bold transition flex items-center justify-center space-x-1 shadow-lg',
-                    alarm.category === 'SOS' ? 'bg-red-600 hover:bg-red-500 text-white shadow-red-600/30' :
-                    alarm.category === 'FALL' ? 'bg-orange-600 hover:bg-orange-500 text-white shadow-orange-600/30' :
-                    alarm.category === 'VITAL' ? 'bg-pink-600 hover:bg-pink-500 text-white shadow-pink-600/30' :
-                    'bg-cyan-700 hover:bg-cyan-600 text-white shadow-cyan-700/30']"
+                  :class="['flex-1 py-1.5 rounded-lg text-xs font-bold transition flex items-center justify-center space-x-1 shadow-lg', getCategoryTheme(alarmCategoryFilter).button]"
                 >
                   <MapPin :size="12" />
                   <span>定位此设备</span>

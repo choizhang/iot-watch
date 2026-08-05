@@ -182,7 +182,7 @@ func (s *AlertService) ProcessPayload(payload *models.DevicePayload) error {
 	// 确保 MySQL 中存在设备记录，然后更新设备最后状态
 	s.mysqlSvc.GetOrCreateDevice(payload.IMEI)
 	s.mysqlSvc.UpdateDeviceStatus(payload.IMEI, state.Status, payload.Timestamp,
-		payload.Latitude, payload.Longitude, payload.HeartRate, payload.Battery)
+		payload.Latitude, payload.Longitude, payload.HeartRate, payload.Battery, "", 0, 0, 0)
 
 	// 处理告警逻辑
 	if payload.IsAlert() {

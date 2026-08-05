@@ -55,7 +55,7 @@ func InitMySQL(cfg *config.Config) error {
 
 // autoMigrate 自动迁移数据库表
 func autoMigrate() error {
-	return mysqlClient.db.AutoMigrate(
+	err := mysqlClient.db.AutoMigrate(
 		&models.Device{},
 		&models.DeviceEvent{},
 		&models.DeviceAlert{},
@@ -65,6 +65,28 @@ func autoMigrate() error {
 		&models.DeviceReminder{},
 		&models.Geofence{},
 	)
+	if err != nil {
+		return err
+	}
+
+	// 自动修复历史上报但解析前保存为 0 的心率事件
+	mysqlClient.db.Exec(`
+		UPDATE device_events 
+		SET heart_rate = CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(raw_payload, ',', -1), ']', 1) AS UNSIGNED) 
+		WHERE (event_type = 'HEART' OR raw_payload LIKE '%*HEART,%') AND heart_rate = 0 AND raw_payload LIKE '%,%'
+	`)
+
+	// 刷新 devices 表中的最新心率
+	var devices []models.Device
+	mysqlClient.db.Find(&devices)
+	for _, dev := range devices {
+		var lastEvent models.DeviceEvent
+		if err := mysqlClient.db.Where("imei = ? AND heart_rate > 0", dev.IMEI).Order("event_time DESC").First(&lastEvent).Error; err == nil {
+			mysqlClient.db.Model(&models.Device{}).Where("imei = ?", dev.IMEI).UpdateColumn("last_heart_rate", lastEvent.HeartRate)
+		}
+	}
+
+	return nil
 }
 
 // GetMySQLClient 获取 MySQL 客户端实例
@@ -97,14 +119,40 @@ func (m *MySQLService) SaveDeviceAlert(alert *models.DeviceAlert) error {
 
 // UpdateDeviceStatus 更新设备状态
 func (m *MySQLService) UpdateDeviceStatus(imei string, status string, heartbeat time.Time,
-	lat, lng float64, heartRate, battery int) error {
+	lat, lng float64, heartRate, battery int, bp string, spo2 int, hrv int, steps int) error {
 
 	updates := map[string]interface{}{
-		"last_heartbeat":  heartbeat,
-		"last_latitude":   lat,
-		"last_longitude":  lng,
-		"last_heart_rate": heartRate,
-		"battery":         battery,
+		"last_heartbeat": heartbeat,
+	}
+
+	if lat != 0 || lng != 0 {
+		updates["last_latitude"] = lat
+		updates["last_longitude"] = lng
+	}
+
+	if heartRate > 0 {
+		updates["last_heart_rate"] = heartRate
+	}
+
+	if battery > 0 {
+		updates["battery"] = battery
+	}
+
+	if bp != "" {
+		updates["blood_pressure"] = bp
+	}
+
+	if spo2 > 0 {
+		updates["spo2"] = spo2
+		updates["sp_o2"] = spo2
+	}
+
+	if hrv > 0 {
+		updates["hrv"] = hrv
+	}
+
+	if steps > 0 {
+		updates["steps"] = steps
 	}
 
 	// 根据消息类型更新状态
@@ -157,6 +205,19 @@ func (m *MySQLService) SaveAlarmOrder(order *models.AlarmOrder) error {
 	log.Printf("[DEBUG] 告警工单已保存: AlarmID=%s, IMEI=%s, Type=%s, Status=%s",
 		order.AlarmID, order.DeviceIMEI, order.AlertType, order.Status)
 	return nil
+}
+
+// CleanOldDeviceEvents 清理指定天数之前的常规高频设备事件记录（告警工单 AlarmOrder 与设备最新状态不受影响）
+func (m *MySQLService) CleanOldDeviceEvents(retentionDays int) (int64, error) {
+	cutoffTime := time.Now().AddDate(0, 0, -retentionDays)
+	result := m.db.Where("created_at < ?", cutoffTime).Delete(&models.DeviceEvent{})
+	if result.Error != nil {
+		return 0, fmt.Errorf("清理过期历史事件失败: %w", result.Error)
+	}
+	if result.RowsAffected > 0 {
+		log.Printf("[INFO] [MySQL 归档清理] 已清理 %d 天前的过期历史设备事件记录: 共 %d 条", retentionDays, result.RowsAffected)
+	}
+	return result.RowsAffected, nil
 }
 
 // Close 关闭数据库连接

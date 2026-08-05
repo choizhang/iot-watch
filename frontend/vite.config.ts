@@ -17,4 +17,9 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'), // ✅ 定义 @ = src
     },
   },
+  server: {
+    port: 5173,
+    strictPort: true,
+    host: true,
+  },
 })

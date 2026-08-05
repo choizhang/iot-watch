@@ -11,6 +11,8 @@ export interface DeviceStatus {
   address: string
   updated_at: number
   location_type?: 'GPS' | 'WIFI' | 'LBS'
+  last_location_type?: string
+  accuracy?: number
 }
 
 export interface HealthData {
@@ -39,7 +41,7 @@ const API_BASE = 'http://localhost:8080/api/v1'
 
 export const useDeviceStore = defineStore('device', {
   state: () => ({
-    currentImei: localStorage.getItem('current_imei') || '1234567890',
+    currentImei: localStorage.getItem('current_imei') || '351086239665254',
     status: null as DeviceStatus | null,
     health: null as HealthData | null,
     loading: false,
@@ -59,13 +61,13 @@ export const useDeviceStore = defineStore('device', {
           this.status = {
             imei: this.currentImei,
             status: 'online',
-            battery: 88,
-            last_heart_rate: 76,
-            last_latitude: 22.396428,
-            last_longitude: 114.109497,
-            address: '香港葵青區葵涌興芳路 223 號新都會廣場',
+            battery: 61,
+            last_heart_rate: 75,
+            last_latitude: 30.658633,
+            last_longitude: 104.064718,
+            address: '四川省成都市武侯区人民南路四段 27 号',
             updated_at: Math.floor(Date.now() / 1000),
-            location_type: 'GPS'
+            location_type: 'WIFI'
           }
           this.error = null
           return
@@ -287,7 +289,12 @@ export const useDeviceStore = defineStore('device', {
       if (this.useMock) {
         const cached = localStorage.getItem(`geofences_${this.currentImei}`)
         if (cached) {
-          this.geofences = JSON.parse(cached)
+          try {
+            const parsed = JSON.parse(cached)
+            this.geofences = Array.isArray(parsed) ? parsed : []
+          } catch (e) {
+            this.geofences = []
+          }
         } else {
           this.geofences = [
             {
@@ -308,9 +315,10 @@ export const useDeviceStore = defineStore('device', {
 
       try {
         const res = await axios.get(`${API_BASE}/device/${this.currentImei}/geofences`)
-        this.geofences = res.data
+        this.geofences = Array.isArray(res.data) ? res.data : []
       } catch (err) {
         console.error('获取电子围栏失败', err)
+        this.geofences = []
       }
     },
 

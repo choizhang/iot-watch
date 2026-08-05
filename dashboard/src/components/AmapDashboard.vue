@@ -1,7 +1,20 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
-import { getAMapInstance } from '../utils/amap'
+import { getGoogleMapsInstance } from '../utils/amap'
 import type { DeviceItem } from '../store/dashboard'
+import { Plus, Minus, Crosshair, MapPin, Moon, Sun, Globe } from 'lucide-vue-next'
+
+/*
+// ------------------------------------------------------------------
+// 原高德地图 (AMap) 逻辑（暂时注释保留）
+// ------------------------------------------------------------------
+import { getAMapInstance } from '../utils/amap'
+let AMapObj: any = null
+let geocoder: any = null
+let heatmapObj: any = null
+let satelliteLayer: any = null
+...
+*/
 
 export interface GeofenceProps {
   id: number
@@ -46,15 +59,34 @@ const loadError = ref(false)
 const currentStyle = ref<'dark' | 'normal' | 'satellite'>('dark')
 
 let mapInstance: any = null
-let AMapObj: any = null
-let geocoder: any = null
+let googleObj: any = null
 let markers: any[] = []
 let trackPolyline: any = null
 let trackMarkers: any[] = []
 let runnerMarker: any = null
 let heatmapObj: any = null
-let satelliteLayer: any = null
 let fenceCircles: any[] = []
+
+// 谷歌地图暗黑模式风格 Style JSON
+const DARK_MAP_STYLE = [
+  { elementType: 'geometry', stylers: [{ color: '#1d2c4d' }] },
+  { elementType: 'labels.text.stroke', stylers: [{ color: '#1a3646' }] },
+  { elementType: 'labels.text.fill', stylers: [{ color: '#8ec3b9' }] },
+  { featureType: 'administrative.country', elementType: 'geometry.stroke', stylers: [{ color: '#4b6878' }] },
+  { featureType: 'administrative.province', elementType: 'geometry.stroke', stylers: [{ color: '#4b6878' }] },
+  { featureType: 'landscape.man_made', elementType: 'geometry.stroke', stylers: [{ color: '#334e68' }] },
+  { featureType: 'landscape.natural', elementType: 'geometry', stylers: [{ color: '#021019' }] },
+  { featureType: 'poi', elementType: 'geometry', stylers: [{ color: '#283d6a' }] },
+  { featureType: 'poi', elementType: 'labels.text.fill', stylers: [{ color: '#6f9ba5' }] },
+  { featureType: 'poi.park', elementType: 'geometry.fill', stylers: [{ color: '#023e58' }] },
+  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#304a7d' }] },
+  { featureType: 'road', elementType: 'labels.text.fill', stylers: [{ color: '#98a5be' }] },
+  { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#2c4595' }] },
+  { featureType: 'road.highway', elementType: 'geometry.stroke', stylers: [{ color: '#1f2835' }] },
+  { featureType: 'transit', elementType: 'labels.text.fill', stylers: [{ color: '#98a5be' }] },
+  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#0e1626' }] },
+  { featureType: 'water', elementType: 'labels.text.fill', stylers: [{ color: '#4e6d96' }] }
+]
 
 // 防御性安全坐标计算
 const getValidCoords = (dev: DeviceItem): [number, number] => {
@@ -62,64 +94,103 @@ const getValidCoords = (dev: DeviceItem): [number, number] => {
   let lng = Number(dev.last_longitude)
 
   if (isNaN(lat) || lat <= 0) {
-    lat = dev.imei === '1234567890' ? 22.396428 : dev.imei === '868811000000015' ? 22.371234 : 22.381200
+    lat = dev.imei === '1234567890' ? 22.396428 : dev.imei === '868811000000015' ? 22.371234 : 30.658633
   }
   if (isNaN(lng) || lng <= 0) {
-    lng = dev.imei === '1234567890' ? 114.109497 : dev.imei === '868811000000015' ? 114.115678 : 114.189100
+    lng = dev.imei === '1234567890' ? 114.109497 : dev.imei === '868811000000015' ? 114.115678 : 104.064718
   }
   return [lng, lat]
 }
 
 const changeMapStyle = (style: 'dark' | 'normal' | 'satellite') => {
   currentStyle.value = style
-  if (!mapInstance || !AMapObj) return
+  if (!mapInstance || !googleObj) return
 
   if (style === 'satellite') {
-    if (!satelliteLayer) {
-      satelliteLayer = new AMapObj.TileLayer.Satellite()
-    }
-    satelliteLayer.setMap(mapInstance)
+    mapInstance.setMapTypeId(googleObj.MapTypeId.HYBRID)
+  } else if (style === 'dark') {
+    mapInstance.setMapTypeId(googleObj.MapTypeId.ROADMAP)
+    mapInstance.setOptions({ styles: DARK_MAP_STYLE })
   } else {
-    if (satelliteLayer) {
-      satelliteLayer.setMap(null)
-    }
-    mapInstance.setMapStyle(`amap://styles/${style}`)
+    mapInstance.setMapTypeId(googleObj.MapTypeId.ROADMAP)
+    mapInstance.setOptions({ styles: [] })
   }
 }
 
+const zoomIn = () => {
+  if (mapInstance) mapInstance.setZoom(mapInstance.getZoom() + 1)
+}
+
+const zoomOut = () => {
+  if (mapInstance) mapInstance.setZoom(mapInstance.getZoom() - 1)
+}
+
 const resetMapOverview = () => {
-  if (!mapInstance) return
-  mapInstance.setPitch(0, false, 300)
+  if (!mapInstance || !googleObj) return
   const singleDevice = props.devices.length === 1 ? props.devices[0] : null
-  const targetCenter: [number, number] = singleDevice ? getValidCoords(singleDevice) : [114.1694, 22.3193]
-  const targetZoom = props.zoomLevel ? props.zoomLevel : (singleDevice ? 17 : 11)
-  mapInstance.setZoomAndCenter(targetZoom, targetCenter, false, 300)
+  const [lng, lat] = singleDevice ? getValidCoords(singleDevice) : [104.064718, 30.658633]
+  const targetZoom = props.zoomLevel ? props.zoomLevel : (singleDevice ? 17 : 12)
+  mapInstance.setZoom(targetZoom)
+  mapInstance.panTo({ lat, lng })
   emit('reset-view')
+}
+
+// 定义用于 Google Maps 的 HTML 自定义 Marker 覆盖物
+function createCustomHTMLOverlay(googleMaps: any, pos: { lat: number; lng: number }, element: HTMLElement) {
+  class CustomHTMLOverlay extends googleMaps.OverlayView {
+    position: any
+    element: HTMLElement
+    constructor(p: { lat: number; lng: number }, el: HTMLElement) {
+      super()
+      this.position = new googleMaps.LatLng(p.lat, p.lng)
+      this.element = el
+    }
+    onAdd() {
+      const panes = this.getPanes()
+      panes?.overlayMouseTarget.appendChild(this.element)
+    }
+    draw() {
+      const overlayProjection = this.getProjection()
+      if (!overlayProjection) return
+      const point = overlayProjection.fromLatLngToDivPixel(this.position)
+      if (point) {
+        this.element.style.left = point.x + 'px'
+        this.element.style.top = point.y + 'px'
+        this.element.style.transform = 'translate(-50%, -50%)'
+        this.element.style.position = 'absolute'
+      }
+    }
+    onRemove() {
+      if (this.element.parentNode) {
+        this.element.parentNode.removeChild(this.element)
+      }
+    }
+  }
+  return new CustomHTMLOverlay(pos, element)
 }
 
 const initMap = async () => {
   loading.value = true
   loadError.value = false
   try {
-    AMapObj = await getAMapInstance()
+    googleObj = await getGoogleMapsInstance()
 
     if (!mapContainer.value) return
 
-    geocoder = new AMapObj.Geocoder({ city: '香港特别行政区' })
-
     const singleDevice = props.devices.length === 1 ? props.devices[0] : null
-    const initialCenter = singleDevice 
+    const [lng, lat] = singleDevice 
       ? getValidCoords(singleDevice)
-      : [114.1694, 22.3193]
+      : [104.064718, 30.658633]
 
-    const initialZoom = props.zoomLevel ? props.zoomLevel : (singleDevice ? 17 : 11)
+    const initialZoom = props.zoomLevel ? props.zoomLevel : (singleDevice ? 17 : 12)
 
-    mapInstance = new AMapObj.Map(mapContainer.value, {
-      viewMode: '2D',
+    mapInstance = new googleObj.Map(mapContainer.value, {
       zoom: initialZoom,
-      center: initialCenter,
-      pitch: 0,
-      mapStyle: `amap://styles/${currentStyle.value}`,
+      center: { lat, lng },
+      mapTypeId: currentStyle.value === 'satellite' ? googleObj.MapTypeId.HYBRID : googleObj.MapTypeId.ROADMAP,
+      styles: currentStyle.value === 'dark' ? DARK_MAP_STYLE : [],
+      disableDefaultUI: true,
+      zoomControl: false,
     })
 
     loading.value = false
@@ -129,62 +200,86 @@ const initMap = async () => {
     renderGeofences()
     renderRunner()
   } catch (err) {
-    console.error('高德地图加载失败:', err)
+    console.error('谷歌地图 (Google Maps) 加载失败:', err)
     loading.value = false
     loadError.value = true
   }
 }
 
+let accuracyCircles: any[] = []
+
 const renderMarkers = () => {
-  if (!mapInstance || !AMapObj) return
+  if (!mapInstance || !googleObj) return
 
   markers.forEach(m => m.setMap(null))
   markers = []
+  accuracyCircles.forEach(c => c.setMap(null))
+  accuracyCircles = []
+
+  const bounds = new googleObj.LatLngBounds()
 
   props.devices.forEach((dev) => {
     const [lng, lat] = getValidCoords(dev)
+    bounds.extend({ lat, lng })
 
     const isSOS = dev.status === 'sos_alert'
     const isOnline = dev.status === 'online'
     const isSelected = dev.imei === props.selectedImei
+    const accuracyMeter = dev.accuracy || 18
+
+    // 绘制定位精度与误差米数范围圈 (Accuracy Circle)
+    const accuracyColor = isSOS ? '#ef4444' : isOnline ? '#10b981' : '#f59e0b'
+    const accuracyCircle = new googleObj.Circle({
+      map: mapInstance,
+      center: { lat, lng },
+      radius: accuracyMeter,
+      strokeColor: accuracyColor,
+      strokeOpacity: 0.8,
+      strokeWeight: 1.5,
+      fillColor: accuracyColor,
+      fillOpacity: 0.08,
+      clickable: false,
+    })
+    accuracyCircles.push(accuracyCircle)
 
     const markerDom = document.createElement('div')
-    markerDom.style.width = '28px'
-    markerDom.style.height = '28px'
     markerDom.style.position = 'relative'
     markerDom.style.cursor = 'pointer'
-    markerDom.className = 'group flex flex-col items-center justify-center z-20'
+    markerDom.className = 'z-20'
 
-    const pinBg = isSOS 
-      ? 'bg-red-600 text-white shadow-lg shadow-red-500/60' 
-      : isOnline 
-      ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/50' 
-      : 'bg-slate-700 text-slate-300 shadow-md shadow-slate-900/50'
+    // 状态颜色划分：在线 (翡翠绿 #10b981), 告警 (警示红 #ef4444), 离线 (冷灰 #94a3b8)
+    const iconColor = isSOS ? '#ef4444' : isOnline ? '#10b981' : '#94a3b8'
+    const strapColor = isSOS ? '#dc2626' : isOnline ? '#059669' : '#64748b'
+    const iconBgFill = isSOS ? '#fee2e2' : isOnline ? '#ecfdf5' : '#f8fafc'
 
-    const borderStyle = isSelected 
-      ? 'ring-4 ring-amber-400 ring-offset-2 ring-offset-slate-950 scale-125 z-50' 
-      : 'border-2 border-slate-900'
+    const displayName = dev.owner_name || dev.device_name || (dev.imei ? '长者设备 #' + dev.imei.slice(-4) : '手环设备')
 
-    const svgIcon = isSOS
-      ? `<svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 animate-bounce" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>`
-      : isOnline
-      ? `<svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="6"/><rect x="9" y="2" width="6" height="4" rx="1"/><rect x="9" y="18" width="6" height="4" rx="1"/></svg>`
-      : `<svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="1" y1="1" x2="23" y2="23"/><path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55"/><path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39"/></svg>`
+    const watchSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="${iconColor}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="filter drop-shadow-md">
+      <!-- 上下表带 -->
+      <path d="M9 1h6v5H9z" fill="${strapColor}" stroke="${iconColor}" stroke-width="1.2"/>
+      <path d="M9 18h6v5H9z" fill="${strapColor}" stroke="${iconColor}" stroke-width="1.2"/>
+      <!-- 表盘外壳 -->
+      <rect x="6" y="6" width="12" height="12" rx="3.5" fill="${iconBgFill}" stroke="${iconColor}" stroke-width="2"/>
+      <!-- 表盘心圈与时间指示点 -->
+      <circle cx="12" cy="12" r="2" fill="none" stroke="${iconColor}" stroke-width="1.5" />
+      <!-- 右侧表冠按键 -->
+      <path d="M18.5 10v4" stroke="${iconColor}" stroke-width="2" stroke-linecap="round" />
+    </svg>`
 
     markerDom.innerHTML = `
-      <div class="absolute bottom-full mb-2 hidden group-hover:flex ${isSelected ? '!flex' : ''} flex-col items-center pointer-events-none z-50 transition-all duration-200">
-        <div class="bg-slate-900/95 border border-slate-700/80 text-white px-3 py-1.5 rounded-xl shadow-2xl backdrop-blur-md text-xs font-bold whitespace-nowrap flex items-center space-x-2">
+      <div class="relative flex items-center justify-center select-none group cursor-pointer z-30">
+        <!-- 1. 顶部名称卡片: absolute bottom-full 脱标，保证不侵占文档流高度与几何中点 -->
+        <div class="absolute bottom-full mb-1.5 px-2.5 py-0.5 bg-slate-900/95 border border-slate-700/80 text-white text-xs font-bold rounded-lg shadow-xl whitespace-nowrap flex items-center space-x-1.5 backdrop-blur-md transition-transform group-hover:scale-110 pointer-events-none">
           <span class="w-2 h-2 rounded-full ${isSOS ? 'bg-red-500 animate-ping' : isOnline ? 'bg-emerald-400' : 'bg-slate-400'}"></span>
-          <span>${dev.owner_name}</span>
-          ${isSOS ? '<span class="bg-red-600 text-white text-[10px] px-1 rounded animate-pulse">SOS</span>' : ''}
+          <span>${displayName}</span>
+          <span class="text-[9px] px-1 py-0.2 rounded font-mono text-cyan-300 bg-slate-800 border border-slate-700">±${accuracyMeter}m</span>
+          ${isSOS ? '<span class="bg-red-600 text-white text-[9px] px-1 rounded animate-pulse">SOS</span>' : ''}
         </div>
-        <div class="w-2 h-2 bg-slate-900 rotate-45 -mt-1 border-r border-b border-slate-700/80"></div>
-      </div>
 
-      <div class="relative w-7 h-7 flex items-center justify-center">
-        ${isSOS ? '<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75"></span>' : ''}
-        <div class="w-7 h-7 rounded-full ${pinBg} ${borderStyle} flex items-center justify-center transition-all duration-200 hover:scale-125">
-          ${svgIcon}
+        <!-- 2. 纯粹智能手表 Icon (几何像素中心点 100% 死锁误差圆圈的圆心) -->
+        <div class="relative flex items-center justify-center transition-transform duration-200 hover:scale-125 ${isSelected ? 'scale-125 z-40' : ''}">
+          ${isSOS ? '<span class="animate-ping absolute inline-flex h-8 w-8 rounded-full bg-red-500 opacity-60"></span>' : ''}
+          ${watchSvg}
         </div>
       </div>
     `
@@ -193,24 +288,26 @@ const renderMarkers = () => {
       emit('select-device', dev.imei)
     })
 
-    const marker = new AMapObj.Marker({
-      position: [lng, lat],
-      content: markerDom,
-      offset: new AMapObj.Pixel(-14, -14),
-      zIndex: isSelected ? 200 : 100,
-    })
-
-    marker.on('click', () => {
-      emit('select-device', dev.imei)
-    })
-
-    marker.setMap(mapInstance)
-    markers.push(marker)
+    const overlay = createCustomHTMLOverlay(googleObj, { lat, lng }, markerDom)
+    overlay.setMap(mapInstance)
+    markers.push(overlay)
   })
+
+  if (props.devices.length === 1) {
+    const singleDevice = props.devices[0]
+    if (singleDevice) {
+      const [lng, lat] = getValidCoords(singleDevice)
+      const targetZoom = props.zoomLevel ? props.zoomLevel : 15
+      mapInstance.setZoom(targetZoom)
+      mapInstance.panTo({ lat, lng })
+    }
+  } else if (props.devices.length > 1 && !bounds.isEmpty()) {
+    mapInstance.fitBounds(bounds)
+  }
 }
 
 const renderGeofences = () => {
-  if (!mapInstance || !AMapObj) return
+  if (!mapInstance || !googleObj) return
 
   fenceCircles.forEach(c => c.setMap(null))
   fenceCircles = []
@@ -219,24 +316,23 @@ const renderGeofences = () => {
     props.geofences.forEach(fence => {
       if (!fence.enabled) return
       const isOut = fence.fence_type === 'OUT'
-      const circle = new AMapObj.Circle({
-        center: [fence.longitude, fence.latitude],
+      const circle = new googleObj.Circle({
+        map: mapInstance,
+        center: { lat: fence.latitude, lng: fence.longitude },
         radius: fence.radius,
         strokeColor: isOut ? '#ef4444' : '#0284c7',
         strokeOpacity: 0.85,
         strokeWeight: 2,
         fillColor: isOut ? '#ef4444' : '#0284c7',
         fillOpacity: 0.2,
-        strokeStyle: 'dashed'
       })
-      circle.setMap(mapInstance)
       fenceCircles.push(circle)
     })
   }
 }
 
 const renderTrack = () => {
-  if (!mapInstance || !AMapObj) return
+  if (!mapInstance || !googleObj) return
 
   if (trackPolyline) {
     trackPolyline.setMap(null)
@@ -246,18 +342,15 @@ const renderTrack = () => {
   trackMarkers = []
 
   if (props.showTrack && props.trackPoints && props.trackPoints.length > 1) {
-    trackPolyline = new AMapObj.Polyline({
-      path: props.trackPoints,
-      isOutline: true,
-      outlineColor: '#0284c7',
-      borderWeight: 2,
+    const path = props.trackPoints.map(([lng, lat]) => ({ lat, lng }))
+    trackPolyline = new googleObj.Polyline({
+      path,
+      geodesic: true,
       strokeColor: '#38bdf8',
       strokeOpacity: 0.95,
       strokeWeight: 5,
-      strokeStyle: 'solid',
-      showDir: true,
+      map: mapInstance,
     })
-    trackPolyline.setMap(mapInstance)
 
     props.trackPoints.forEach((pt, idx) => {
       const isStart = idx === 0
@@ -274,25 +367,22 @@ const renderTrack = () => {
         pointDom.innerHTML = `<span class="w-2.5 h-2.5 bg-cyan-400 border border-slate-900 rounded-full shadow-md"></span>`
       }
 
-      const tMarker = new AMapObj.Marker({
-        position: pt,
-        content: pointDom,
-        offset: isStart ? new AMapObj.Pixel(-25, -12) : new AMapObj.Pixel(-5, -5),
-        zIndex: isStart ? 110 : 80
-      })
+      const tMarker = createCustomHTMLOverlay(googleObj, { lat: pt[1], lng: pt[0] }, pointDom)
       tMarker.setMap(mapInstance)
       trackMarkers.push(tMarker)
     })
 
     if (!props.runnerPoint) {
-      mapInstance.setFitView([trackPolyline])
+      const bounds = new googleObj.LatLngBounds()
+      path.forEach(p => bounds.extend(p))
+      mapInstance.fitBounds(bounds)
     }
   }
 }
 
 // 轨迹回放动态移动 Runner Marker
 const renderRunner = () => {
-  if (!mapInstance || !AMapObj) return
+  if (!mapInstance || !googleObj) return
 
   if (runnerMarker) {
     runnerMarker.setMap(null)
@@ -308,40 +398,29 @@ const renderRunner = () => {
         🚶
       </div>
     `
-    runnerMarker = new AMapObj.Marker({
-      position: props.runnerPoint,
-      content: runnerDom,
-      offset: new AMapObj.Pixel(-14, -14),
-      zIndex: 300
-    })
+    runnerMarker = createCustomHTMLOverlay(googleObj, { lat: props.runnerPoint[1], lng: props.runnerPoint[0] }, runnerDom)
     runnerMarker.setMap(mapInstance)
-    mapInstance.panTo(props.runnerPoint)
+    mapInstance.panTo({ lat: props.runnerPoint[1], lng: props.runnerPoint[0] })
   }
 }
 
 const renderHeatmap = () => {
-  if (!mapInstance || !AMapObj) return
+  if (!mapInstance || !googleObj) return
 
   if (heatmapObj) {
     heatmapObj.setMap(null)
     heatmapObj = null
   }
 
-  if (props.showHeatmap && props.heatmapPoints && props.heatmapPoints.length > 0) {
-    heatmapObj = new AMapObj.HeatMap(mapInstance, {
+  if (props.showHeatmap && props.heatmapPoints && props.heatmapPoints.length > 0 && googleObj.visualization) {
+    const heatmapData = props.heatmapPoints.map(p => ({
+      location: new googleObj.LatLng(p.lat, p.lng),
+      weight: p.count
+    }))
+    heatmapObj = new googleObj.visualization.HeatmapLayer({
+      data: heatmapData,
       radius: props.heatmapRadius || 35,
-      opacity: [0, 0.85],
-      gradient: {
-        0.4: '#3b82f6',
-        0.6: '#06b6d4',
-        0.8: '#10b981',
-        0.9: '#f59e0b',
-        1.0: '#ef4444'
-      }
-    })
-    heatmapObj.setDataSet({
-      data: props.heatmapPoints,
-      max: 100
+      map: mapInstance
     })
   }
 }
@@ -371,18 +450,61 @@ watch(() => props.selectedImei, (newImei) => {
   if (target && mapInstance) {
     const [targetLng, targetLat] = getValidCoords(target)
     const targetZoom = props.zoomLevel ? props.zoomLevel : 15
-    mapInstance.setZoomAndCenter(targetZoom, [targetLng, targetLat], false, 200)
+    mapInstance.setZoom(targetZoom)
+    mapInstance.panTo({ lat: targetLat, lng: targetLng })
   }
   renderMarkers()
 })
+
+let userLocationMarker: any = null
+
+const locateUserPosition = () => {
+  if (!navigator.geolocation) {
+    resetMapOverview()
+    return
+  }
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const uLat = pos.coords.latitude
+      const uLng = pos.coords.longitude
+      if (mapInstance && googleObj) {
+        mapInstance.panTo({ lat: uLat, lng: uLng })
+        mapInstance.setZoom(16)
+
+        if (userLocationMarker) userLocationMarker.setMap(null)
+        userLocationMarker = new googleObj.Marker({
+          position: { lat: uLat, lng: uLng },
+          map: mapInstance,
+          title: '我的当前位置',
+          icon: {
+            path: googleObj.SymbolPath.CIRCLE,
+            scale: 8,
+            fillColor: '#38bdf8',
+            fillOpacity: 1,
+            strokeColor: '#ffffff',
+            strokeWeight: 2,
+          }
+        })
+      }
+    },
+    (err) => {
+      console.warn('获取当前定位失败:', err)
+      resetMapOverview()
+    },
+    { enableHighAccuracy: true, timeout: 5000 }
+  )
+}
 
 onMounted(() => {
   initMap()
 })
 
 onUnmounted(() => {
+  if (userLocationMarker) {
+    userLocationMarker.setMap(null)
+    userLocationMarker = null
+  }
   if (mapInstance) {
-    mapInstance.destroy()
     mapInstance = null
   }
 })
@@ -392,48 +514,75 @@ onUnmounted(() => {
   <div class="relative w-full h-full rounded-2xl overflow-hidden shadow-2xl border border-slate-800 bg-slate-950">
     <div ref="mapContainer" class="w-full h-full min-h-[450px]"></div>
 
-    <!-- 地图皮肤/风格一键切换器 -->
-    <div class="absolute top-4 right-4 glass-panel p-1 rounded-xl flex items-center space-x-1.5 z-20 border border-slate-800 shadow-2xl">
+    <!-- 1. 顶部地图皮肤/风格切换器 -->
+    <div class="absolute top-4 right-4 glass-panel p-1 rounded-xl flex items-center z-20 border border-slate-800 shadow-2xl">
       <div class="flex items-center space-x-1 bg-slate-950/80 p-0.5 rounded-lg border border-slate-800/80">
         <button 
           @click="changeMapStyle('dark')"
-          :class="['px-2.5 py-1 rounded-md text-xs font-bold transition flex items-center space-x-1',
+          :class="['px-2.5 py-1 rounded-md text-xs font-bold transition flex items-center space-x-1.5',
             currentStyle === 'dark' ? 'bg-cyan-600 text-white shadow-md' : 'text-slate-400 hover:text-white']"
         >
-          <span>🌙 科技深色</span>
+          <Moon :size="13" />
+          <span>科技深色</span>
         </button>
         <button 
           @click="changeMapStyle('normal')"
-          :class="['px-2.5 py-1 rounded-md text-xs font-bold transition flex items-center space-x-1',
+          :class="['px-2.5 py-1 rounded-md text-xs font-bold transition flex items-center space-x-1.5',
             currentStyle === 'normal' ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400 hover:text-white']"
         >
-          <span>☀️ 标准彩色</span>
+          <Sun :size="13" />
+          <span>标准彩色</span>
         </button>
         <button 
           @click="changeMapStyle('satellite')"
-          :class="['px-2.5 py-1 rounded-md text-xs font-bold transition flex items-center space-x-1',
+          :class="['px-2.5 py-1 rounded-md text-xs font-bold transition flex items-center space-x-1.5',
             currentStyle === 'satellite' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-white']"
         >
-          <span>🛰️ 卫星实景</span>
+          <Globe :size="13" />
+          <span>卫星实景</span>
         </button>
       </div>
+    </div>
 
+    <!-- 2. 右侧统一竖向地图定位与缩放面板 -->
+    <div class="absolute top-16 right-4 flex flex-col bg-slate-900/90 border border-slate-800 backdrop-blur-md rounded-2xl shadow-2xl z-20 overflow-hidden text-slate-300 font-sans">
       <button 
-        @click="resetMapOverview" 
-        title="重置缩放镜头"
-        class="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-cyan-300 hover:text-white border border-slate-700 rounded-lg text-xs font-bold transition flex items-center space-x-1 shadow-md active:scale-95"
+        @click="zoomIn"
+        class="w-10 h-10 flex items-center justify-center border-b border-slate-800/80 hover:bg-slate-800 text-slate-300 hover:text-white active:scale-95 transition"
+        title="放大地图"
       >
-        <span>🎯 重置全景</span>
+        <Plus :size="18" />
+      </button>
+      <button 
+        @click="zoomOut"
+        class="w-10 h-10 flex items-center justify-center border-b border-slate-800/80 hover:bg-slate-800 text-slate-300 hover:text-white active:scale-95 transition"
+        title="缩小地图"
+      >
+        <Minus :size="18" />
+      </button>
+      <button 
+        @click="resetMapOverview"
+        class="w-10 h-10 flex items-center justify-center border-b border-slate-800/80 hover:bg-slate-800 text-cyan-400 hover:text-cyan-300 active:scale-95 transition"
+        title="聚焦设备位置"
+      >
+        <Crosshair :size="18" />
+      </button>
+      <button 
+        @click="locateUserPosition"
+        class="w-10 h-10 flex items-center justify-center hover:bg-slate-800 text-blue-400 hover:text-blue-300 active:scale-95 transition"
+        title="我的当前位置"
+      >
+        <MapPin :size="18" />
       </button>
     </div>
 
     <div v-if="loading" class="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-md">
       <div class="w-10 h-10 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin mb-3"></div>
-      <span class="text-xs text-cyan-400 font-bold">正在载入高德地图...</span>
+      <span class="text-xs text-cyan-400 font-bold">正在载入谷歌地图 (Google Maps)...</span>
     </div>
 
     <div v-if="loadError" class="absolute inset-0 z-30 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center p-4">
-      <span class="text-red-400 font-bold mb-2">高德地图加载失败</span>
+      <span class="text-red-400 font-bold mb-2">谷歌地图 (Google Maps) 加载失败</span>
       <button @click="initMap" class="text-xs bg-cyan-600 text-white px-4 py-2 rounded-xl font-bold">重新加载</button>
     </div>
     
@@ -448,7 +597,7 @@ onUnmounted(() => {
       </div>
       <div v-if="showTrack" class="flex items-center space-x-2 text-cyan-400 border-l border-slate-700 pl-3 font-bold">
         <span class="w-3 h-1 bg-cyan-400 rounded-full"></span>
-        <span>GPS 历史轨迹漫游</span>
+        <span>历史轨迹漫游</span>
       </div>
     </div>
   </div>

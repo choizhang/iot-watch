@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"context"
 	"elder-guard-iot/config"
+	"elder-guard-iot/handlers"
 	"elder-guard-iot/models"
 	"elder-guard-iot/services"
 	"fmt"
 	"log"
 	"net"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -109,6 +112,7 @@ type TCPServer struct {
 	listener  net.Listener     // 监听器
 	wg        sync.WaitGroup   // WaitGroup 等待所有连接处理结束
 	quit      chan struct{}    // 退出信号
+	stopOnce  sync.Once        // 防止重复关闭 quit channel
 	redisSvc  *services.RedisService
 	mysqlSvc  *services.MySQLService
 	influxSvc *services.InfluxDBService
@@ -211,6 +215,14 @@ func (s *TCPServer) acceptLoop() {
 			continue
 		}
 
+		// 开启 TCP KeepAlive：OS 内核每 30s 发一次探针，连续 3 次无响应（≈90s）后
+		// 自动关闭连接，彻底解决手表侧静默断开导致的"僵尸连接"假在线问题
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			tcpConn.SetKeepAlive(true)
+			tcpConn.SetKeepAlivePeriod(30 * time.Second)
+			log.Printf("[INFO] [安全增强] 已为客户端 %s 启用 TCP KeepAlive (探测周期: 30s)", clientIP)
+		}
+
 		s.wg.Add(1)
 		go s.handleConnection(conn, clientIP)
 	}
@@ -289,29 +301,28 @@ func (s *TCPServer) handleConnection(conn net.Conn, clientIP string) {
 	conn.Close()
 }
 
-// splitByDelim 自定义分隔符，按 '#' 拆包
+// splitByDelim 自定义分隔符，支持 '#', ']', '\n', '\r' 等多协议通用帧尾拆包
 func (s *TCPServer) splitByDelim(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	for i := 0; i < len(data); i++ {
-		if data[i] == '#' {
-			return i + 1, data[:i], nil
+		if data[i] == '#' || data[i] == ']' || data[i] == '\n' {
+			return i + 1, data[:i+1], nil
 		}
 	}
 
 	if atEOF && len(data) > 0 {
-		return len(data), nil, nil
+		return len(data), data, nil
 	}
 	return 0, nil, nil
 }
 
 // processPayload 处理接收到的报文，返回是否成功解析格式
 func (s *TCPServer) processPayload(conn net.Conn, clientAddr string, payload string, boundIMEI *string) bool {
-	log.Printf("[TCP RECEIVE] [%s] 原始报文: %s", clientAddr, payload)
+	log.Printf("[RAW TCP RECEIVED] [%s] Hex=%x | String=%s", clientAddr, []byte(payload), payload)
 
 	parsedData, err := parseTCPPayload(payload)
 	if err != nil {
-		log.Printf("[ERROR] [%s] 报文解析失败: %v", clientAddr, err)
-		conn.Write([]byte("ERROR:PARSE_FAILED\n"))
-		return false
+		log.Printf("[WARN] [%s] 报文无缝容错解析中: %v", clientAddr, err)
+		return true // 保持连接继续读取后续报文，不盲目熔断
 	}
 
 	log.Printf("[TCP PARSED] IMEI=%s, Type=%s, Lat=%.6f, Lon=%.6f, HR=%d, Batt=%d%%",
@@ -321,16 +332,22 @@ func (s *TCPServer) processPayload(conn net.Conn, clientAddr string, payload str
 
 	// 绑定 TCP 会话
 	if boundIMEI != nil {
-		if *boundIMEI == "" {
+		if parsedData.IMEI == "" && *boundIMEI != "" {
+			parsedData.IMEI = *boundIMEI
+		} else if *boundIMEI == "" && parsedData.IMEI != "" {
 			*boundIMEI = parsedData.IMEI
 			s.sessions.Store(parsedData.IMEI, conn)
 			log.Printf("[INFO] [%s] 成功绑定设备 TCP 会话句柄: IMEI=%s", clientAddr, parsedData.IMEI)
-		} else if *boundIMEI != parsedData.IMEI {
+		} else if parsedData.IMEI != "" && *boundIMEI != parsedData.IMEI {
 			// 同连接变更 IMEI
 			s.sessions.Delete(*boundIMEI)
 			*boundIMEI = parsedData.IMEI
 			s.sessions.Store(parsedData.IMEI, conn)
 		}
+	}
+
+	if parsedData.IMEI == "" {
+		return true
 	}
 
 	// 检查设备 IMEI 注册与合法性
@@ -350,21 +367,45 @@ func (s *TCPServer) processPayload(conn net.Conn, clientAddr string, payload str
 		log.Printf("[ERROR] [%s] Redis 写入失败: %v", clientAddr, err)
 	}
 
-	// 写入 InfluxDB
+	// 写入 InfluxDB 时序数据库
 	if err := s.writeToInfluxDB(parsedData); err != nil {
 		log.Printf("[ERROR] [%s] InfluxDB 写入失败: %v", clientAddr, err)
 	}
 
+	// 写入 MySQL 事件表
+	if err := s.writeToMySQL(parsedData); err != nil {
+		log.Printf("[ERROR] [%s] MySQL 事件写入失败: %v", clientAddr, err)
+	}
+
 	// 更新 MySQL 中的最后心跳时间与状态
 	s.mysqlSvc.UpdateDeviceStatus(parsedData.IMEI, "online", time.Now(),
-		parsedData.Latitude, parsedData.Longitude, parsedData.HeartRate, parsedData.Battery)
+		parsedData.Latitude, parsedData.Longitude, parsedData.HeartRate, parsedData.Battery,
+		parsedData.BloodPressure, parsedData.SpO2, parsedData.HRV, parsedData.Steps)
 
-	conn.Write([]byte("OK\n"))
+	if parsedData.AckResponse != "" {
+		conn.Write([]byte(parsedData.AckResponse))
+		log.Printf("[TCP ACK SENT] [%s] 发送响应应答包: %s", clientAddr, parsedData.AckResponse)
+
+		// 若手环未锁定 GPS，下发 GPS 唤醒与定位频度设置指令
+		if parsedData.Latitude == 0 && (parsedData.EventType == "VER" || parsedData.EventType == "LK" || parsedData.EventType == "WEATHER" || parsedData.EventType == "UD") {
+			cmdGpsOn := fmt.Sprintf("[CS*%s*0006*GPSON,1]", parsedData.IMEI)
+			cmdUpload := fmt.Sprintf("[CS*%s*000A*UPLOAD,30]", parsedData.IMEI)
+			conn.Write([]byte(cmdGpsOn))
+			conn.Write([]byte(cmdUpload))
+			log.Printf("[TCP CMD DOWN] [%s] 主动下发 GPSON 唤醒指令: %s, %s", clientAddr, cmdGpsOn, cmdUpload)
+		}
+	} else {
+		conn.Write([]byte("OK\n"))
+	}
 	return true
 }
 
-// isDeviceRegistered 校验设备 IMEI 是否已注册
+// isDeviceRegistered 校验设备 IMEI 是否已注册 (未注册时自动在线建档注册)
 func (s *TCPServer) isDeviceRegistered(imei string) bool {
+	if imei == "" {
+		return false
+	}
+
 	ctx := context.Background()
 	cacheKey := fmt.Sprintf("device:registered:%s", imei)
 
@@ -379,30 +420,154 @@ func (s *TCPServer) isDeviceRegistered(imei string) bool {
 		return true
 	}
 
+	suffix := imei
+	if len(imei) >= 4 {
+		suffix = imei[len(imei)-4:]
+	}
+
+	// 自动为新连入的真实硬件设备建档注册
+	newDevice := models.Device{
+		IMEI:        imei,
+		DeviceName:  "真实智能手环 (" + suffix + ")",
+		DeviceModel: "UWS6121E",
+		OwnerName:   "长者用户",
+		OwnerPhone:  "13800138000",
+		Status:      "online",
+		Battery:     50,
+	}
+	if err := s.mysqlSvc.GetDB().Create(&newDevice).Error; err == nil {
+		log.Printf("[INFO] [硬件自适应建档] 成功自动为真实手环建立数据库档册: IMEI=%s", imei)
+		s.redisSvc.GetClient().Set(ctx, cacheKey, "1", 10*time.Minute)
+		return true
+	}
+
 	s.redisSvc.GetClient().Set(ctx, cacheKey, "0", 1*time.Minute)
 	return false
 }
 
 // ParsedDeviceData 解析后的设备数据
 type ParsedDeviceData struct {
-	IMEI       string
-	EventType  string
-	Latitude   float64
-	Longitude  float64
-	HeartRate  int
-	Battery    int
-	SOSFlag    bool
-	RawPayload string
-	Timestamp  time.Time
+	IMEI          string
+	EventType     string
+	Latitude      float64
+	Longitude     float64
+	HeartRate     int
+	Battery       int
+	BloodPressure string
+	SpO2          int
+	HRV           int
+	Steps         int
+	SOSFlag       bool
+	RawPayload    string
+	Timestamp     time.Time
+	AckResponse   string
 }
 
 // IsAlert 判断是否为告警类型消息
 func (p *ParsedDeviceData) IsAlert() bool {
-	return p.EventType == models.MsgTypeSOS || p.EventType == models.MsgTypeFall
+	return p.SOSFlag || p.EventType == models.MsgTypeSOS || p.EventType == models.MsgTypeFall || p.EventType == "AL"
 }
 
-// parseTCPPayload 解析 TCP 报文
+var (
+	macRegex    = regexp.MustCompile(`([0-9a-fA-F]{2}[:\-][0-9a-fA-F]{2}[:\-][0-9a-fA-F]{2}[:\-][0-9a-fA-F]{2}[:\-][0-9a-fA-F]{2}[:\-][0-9a-fA-F]{2})`)
+	cellRegex   = regexp.MustCompile(`@?(\d{3})!(\d+)!(\d+)!(\d+)`)
+	wifiCacheMu sync.Mutex
+	wifiCache   = make(map[string]*deviceWiFiCache)
+)
+
+type deviceWiFiCache struct {
+	Cell      *handlers.CellTowerInfo
+	BSSIDs    map[string]bool
+	UpdatedAt time.Time
+}
+
+func tryResolveWiFiAndLBS(payload string, result *ParsedDeviceData) {
+	if result == nil || (result.Latitude != 0 && result.Longitude != 0) {
+		return
+	}
+
+	imei := result.IMEI
+	wifiCacheMu.Lock()
+	defer wifiCacheMu.Unlock()
+
+	if imei == "" && len(wifiCache) > 0 {
+		var recentKey string
+		var latest time.Time
+		for k, cache := range wifiCache {
+			if cache.UpdatedAt.After(latest) && time.Since(cache.UpdatedAt) < 5*time.Second {
+				latest = cache.UpdatedAt
+				recentKey = k
+			}
+		}
+		imei = recentKey
+	}
+
+	if imei == "" {
+		return
+	}
+
+	cache, exists := wifiCache[imei]
+	if !exists || time.Since(cache.UpdatedAt) > 10*time.Second {
+		cache = &deviceWiFiCache{
+			BSSIDs: make(map[string]bool),
+		}
+		wifiCache[imei] = cache
+	}
+	cache.UpdatedAt = time.Now()
+
+	// 提取基站信息
+	cellMatches := cellRegex.FindStringSubmatch(payload)
+	if len(cellMatches) >= 5 {
+		mcc, _ := strconv.Atoi(cellMatches[1])
+		mnc, _ := strconv.Atoi(cellMatches[2])
+		lac, _ := strconv.Atoi(cellMatches[3])
+		cid, _ := strconv.Atoi(cellMatches[4])
+		if cid > 0 {
+			cache.Cell = &handlers.CellTowerInfo{
+				MCC:    mcc,
+				MNC:    mnc,
+				LAC:    lac,
+				CellID: cid,
+			}
+		}
+	}
+
+	// 提取全部 MAC 地址并做多热点聚合
+	macMatches := macRegex.FindAllStringSubmatch(payload, -1)
+	for _, m := range macMatches {
+		if len(m) >= 2 {
+			cache.BSSIDs[m[1]] = true
+		}
+	}
+
+	var bssids []string
+	for b := range cache.BSSIDs {
+		bssids = append(bssids, b)
+	}
+
+	if len(bssids) > 0 || cache.Cell != nil {
+		if lat, lng, _, locType, err := handlers.ResolveLocationFromWiFiAndLBS(bssids, cache.Cell); err == nil && lat != 0 && lng != 0 {
+			result.Latitude = lat
+			result.Longitude = lng
+			result.EventType = "WIFI"
+			if locType != "" {
+				result.EventType = locType
+			}
+			result.IMEI = imei
+		}
+	}
+}
+
+// parseTCPPayload 解析 TCP 报文 (全面兼容 [CS*IMEI*LEN*CMD,...] 协议与 *HQ,IMEI,...# 协议)
 func parseTCPPayload(payload string) (*ParsedDeviceData, error) {
+	res, err := parseTCPPayloadInternal(payload)
+	if err == nil && res != nil {
+		tryResolveWiFiAndLBS(payload, res)
+	}
+	return res, err
+}
+
+func parseTCPPayloadInternal(payload string) (*ParsedDeviceData, error) {
 	payload = strings.TrimSpace(payload)
 
 	result := &ParsedDeviceData{
@@ -410,51 +575,252 @@ func parseTCPPayload(payload string) (*ParsedDeviceData, error) {
 		Timestamp:  time.Now(),
 	}
 
-	if !strings.HasPrefix(payload, "*HQ,") {
-		return nil, fmt.Errorf("无效报文格式")
-	}
+	// 1. 处理 [厂商*IMEI*LEN*CMD,内容] 格式协议 (如 [CS*351086239665254*0014*LK,1785492499,0,5,43])
+	if strings.HasPrefix(payload, "[") && strings.HasSuffix(payload, "]") {
+		content := strings.TrimPrefix(payload, "[")
+		content = strings.TrimSuffix(content, "]")
 
-	payload = strings.TrimPrefix(payload, "*HQ,")
-	payload = strings.TrimSuffix(payload, "#")
-
-	parts := strings.Split(payload, ",")
-	if len(parts) < 2 {
-		return nil, fmt.Errorf("报文字段不足")
-	}
-
-	result.IMEI = parts[0]
-	if len(result.IMEI) < 10 || len(result.IMEI) > 15 {
-		return nil, fmt.Errorf("无效 IMEI: %s", result.IMEI)
-	}
-
-	eventType := strings.ToUpper(parts[1])
-	result.EventType = eventType
-
-	if len(parts) >= 8 && strings.ToUpper(parts[3]) == "A" {
-		if lat, err := parseCoordinate(parts[4], parts[5]); err == nil {
-			result.Latitude = lat
+		sections := strings.SplitN(content, "*", 4)
+		if len(sections) < 4 {
+			return nil, fmt.Errorf("[方括号协议] 分隔节不足: %s", payload)
 		}
-		if lng, err := parseCoordinate(parts[6], parts[7]); err == nil {
-			result.Longitude = lng
+
+		vendor := sections[0]
+		imei := sections[1]
+		cmdAndData := sections[3]
+
+		if len(imei) < 10 || len(imei) > 20 {
+			return nil, fmt.Errorf("[方括号协议] 无效 IMEI: %s", imei)
 		}
+
+		result.IMEI = imei
+		cmdParts := strings.Split(cmdAndData, ",")
+		cmd := strings.ToUpper(cmdParts[0])
+		result.EventType = cmd
+
+		// 心跳包 [CS*IMEI*LEN*LK,时间戳,步数,状态,电量]
+		if cmd == "LK" {
+			if len(cmdParts) >= 3 {
+				if st, err := parseInt(cmdParts[2]); err == nil && st > 0 {
+					result.Steps = st
+				}
+			}
+			if len(cmdParts) >= 5 {
+				if batt, err := parseInt(cmdParts[4]); err == nil {
+					result.Battery = batt
+				}
+			} else if len(cmdParts) >= 4 {
+				if batt, err := parseInt(cmdParts[3]); err == nil {
+					result.Battery = batt
+				}
+			}
+			result.AckResponse = fmt.Sprintf("[%s*%s*0002*LK]", vendor, imei)
+			return result, nil
+		}
+
+		// 版本包 [CS*IMEI*LEN*VER,...]
+		if cmd == "VER" {
+			result.AckResponse = fmt.Sprintf("[%s*%s*0003*VER]", vendor, imei)
+			return result, nil
+		}
+
+		// 混合定位包 WEATHER [CS*IMEI*LEN*WEATHER,3,1785727050,209,1N0.0000E0.0000@460!...#]
+		if cmd == "WEATHER" {
+			result.AckResponse = fmt.Sprintf("[%s*%s*0002*WEATHER]", vendor, imei)
+			if len(cmdParts) >= 5 {
+				mixStr := cmdParts[4]
+				gpsPart := mixStr
+				if idx := strings.Index(mixStr, "@"); idx != -1 {
+					gpsPart = mixStr[:idx]
+				}
+				gpsPart = strings.TrimSuffix(gpsPart, "#")
+
+				gpsRegex := regexp.MustCompile(`^(\d+)N([0-9.]+)E([0-9.]+)`)
+				matches := gpsRegex.FindStringSubmatch(gpsPart)
+				if len(matches) >= 4 {
+					satellites, _ := strconv.Atoi(matches[1])
+					latVal, _ := strconv.ParseFloat(matches[2], 64)
+					lonVal, _ := strconv.ParseFloat(matches[3], 64)
+
+					if satellites >= 3 && latVal > 0 && lonVal > 0 {
+						if latVal > 90 {
+							if parsedLat, err := parseCoordinate(matches[2], "N"); err == nil {
+								latVal = parsedLat
+							}
+							if parsedLon, err := parseCoordinate(matches[3], "E"); err == nil {
+								lonVal = parsedLon
+							}
+						}
+						result.Latitude = latVal
+						result.Longitude = lonVal
+						result.EventType = "GPS"
+					}
+				}
+			}
+			if len(cmdParts) >= 4 {
+				if batt, err := parseInt(cmdParts[3]); err == nil && batt <= 100 && batt > 0 {
+					result.Battery = batt
+				}
+			}
+			return result, nil
+		}
+
+		// 位置包与报警包 UD / UD2 / AL
+		if cmd == "UD" || cmd == "UD2" || cmd == "AL" {
+			if cmd == "AL" {
+				result.SOSFlag = true
+				result.EventType = models.MsgTypeSOS
+			}
+			result.AckResponse = fmt.Sprintf("[%s*%s*0002*%s]", vendor, imei, cmd)
+
+			// 解析 GPS 基础位置 (数据从 cmdParts[1] 开始: 日期, 时间, 定位A/V, 纬度, N/S, 经度, E/W...)
+			if len(cmdParts) >= 9 && strings.ToUpper(cmdParts[3]) == "A" {
+				if lat, err := parseCoordinate(cmdParts[4], cmdParts[5]); err == nil {
+					result.Latitude = lat
+				}
+				if lng, err := parseCoordinate(cmdParts[6], cmdParts[7]); err == nil {
+					result.Longitude = lng
+				}
+			}
+			// 解析电量与心率
+			if len(cmdParts) >= 15 {
+				if hr, err := parseInt(cmdParts[13]); err == nil && hr > 0 {
+					result.HeartRate = hr
+				}
+				if batt, err := parseInt(cmdParts[14]); err == nil {
+					result.Battery = batt
+				}
+			}
+			return result, nil
+		}
+
+		// 血压与心率数据包 [CS*IMEI*LEN*BPUP,时间戳,舒张压(低压),收缩压(高压),心率]
+		if cmd == "BPUP" {
+			if len(cmdParts) >= 4 {
+				dia, _ := parseInt(cmdParts[2])
+				sys, _ := parseInt(cmdParts[3])
+				if sys > 0 && dia > 0 {
+					result.BloodPressure = fmt.Sprintf("%d/%d", sys, dia)
+				}
+			}
+			if len(cmdParts) >= 5 {
+				if hr, err := parseInt(cmdParts[4]); err == nil {
+					result.HeartRate = hr
+				}
+			}
+			result.AckResponse = fmt.Sprintf("[%s*%s*0002*BPUP]", vendor, imei)
+			return result, nil
+		}
+
+		// 血氧数据包 [CS*IMEI*LEN*SPO2,时间戳,血氧值] 或 [CS*IMEI*LEN*SPO2,血氧值]
+		if cmd == "SPO2" || cmd == "SPO" || cmd == "BLOOD_OXYGEN" || cmd == "BO" {
+			if len(cmdParts) >= 3 {
+				if val, err := parseInt(cmdParts[2]); err == nil && val > 0 {
+					result.SpO2 = val
+				}
+			}
+			if result.SpO2 == 0 && len(cmdParts) >= 2 {
+				if val, err := parseInt(cmdParts[1]); err == nil && val > 0 {
+					result.SpO2 = val
+				}
+			}
+			result.AckResponse = fmt.Sprintf("[%s*%s*0002*%s]", vendor, imei, cmd)
+			return result, nil
+		}
+
+		// 体温/HRV 数据包 [CS*IMEI*LEN*BT/HRV/TEMP,时间戳,数值]
+		if cmd == "BT" || cmd == "TEMP" || cmd == "HRV" {
+			if len(cmdParts) >= 3 {
+				if val, err := parseInt(cmdParts[2]); err == nil && val > 0 {
+					result.HRV = val
+				}
+			}
+			result.AckResponse = fmt.Sprintf("[%s*%s*0002*%s]", vendor, imei, cmd)
+			return result, nil
+		}
+
+		// 心率数据包 [CS*IMEI*LEN*HEART,时间戳,心率] 或 [CS*IMEI*LEN*HT,时间戳,心率]
+		if cmd == "HEART" || cmd == "HT" || cmd == "HR" || cmd == "HEARTRATE" {
+			if len(cmdParts) >= 3 {
+				if hr, err := parseInt(cmdParts[2]); err == nil && hr > 0 {
+					result.HeartRate = hr
+				}
+			} else if len(cmdParts) >= 2 {
+				if hr, err := parseInt(cmdParts[1]); err == nil && hr > 0 {
+					result.HeartRate = hr
+				}
+			}
+			result.AckResponse = fmt.Sprintf("[%s*%s*0002*%s]", vendor, imei, cmd)
+			return result, nil
+		}
+
+		// 心率/血压单发包 (hrtstart / bphrt)
+		if cmd == "HRTSTART" || cmd == "BPHRT" {
+			if len(cmdParts) >= 4 {
+				if hr, err := parseInt(cmdParts[3]); err == nil {
+					result.HeartRate = hr
+				}
+			}
+			result.AckResponse = fmt.Sprintf("[%s*%s*0008*%s]", vendor, imei, cmd)
+			return result, nil
+		}
+
+		// 默认通用 ACK 应答
+		result.AckResponse = fmt.Sprintf("[%s*%s*0002*%s]", vendor, imei, cmd)
+		return result, nil
 	}
 
-	if len(parts) >= 10 {
-		if hr, err := parseInt(parts[8]); err == nil {
-			result.HeartRate = hr
+	// 2. 处理 *HQ,IMEI,TYPE,...# 格式协议
+	if strings.HasPrefix(payload, "*HQ,") {
+		cleanPayload := strings.TrimPrefix(payload, "*HQ,")
+		cleanPayload = strings.TrimSuffix(cleanPayload, "#")
+
+		parts := strings.Split(cleanPayload, ",")
+		if len(parts) < 2 {
+			return nil, fmt.Errorf("报文字段不足")
 		}
-		if batt, err := parseInt(parts[9]); err == nil {
-			if batt > 100 {
-				result.Battery = (batt * 100) / 255
-			} else {
-				result.Battery = batt
+
+		result.IMEI = parts[0]
+		if len(result.IMEI) < 10 || len(result.IMEI) > 20 {
+			return nil, fmt.Errorf("无效 IMEI: %s", result.IMEI)
+		}
+
+		eventType := strings.ToUpper(parts[1])
+		result.EventType = eventType
+
+		if len(parts) >= 8 && strings.ToUpper(parts[3]) == "A" {
+			if lat, err := parseCoordinate(parts[4], parts[5]); err == nil {
+				result.Latitude = lat
+			}
+			if lng, err := parseCoordinate(parts[6], parts[7]); err == nil {
+				result.Longitude = lng
 			}
 		}
+
+		if len(parts) >= 10 {
+			if hr, err := parseInt(parts[8]); err == nil {
+				result.HeartRate = hr
+			}
+			if batt, err := parseInt(parts[9]); err == nil {
+				if batt > 100 {
+					result.Battery = (batt * 100) / 255
+				} else {
+					result.Battery = batt
+				}
+			}
+		}
+
+		result.SOSFlag = result.EventType == "SOS"
+		return result, nil
 	}
 
-	result.SOSFlag = result.EventType == "SOS"
+	// 3. 处理 Wi-Fi 多热点基站续传行 (如 wifi1!60:3a:7c...#-42#)
+	if strings.HasPrefix(payload, "wifi") {
+		result.EventType = "WIFI"
+		return result, nil
+	}
 
-	return result, nil
+	return nil, fmt.Errorf("未知的报文协议头: %s", payload)
 }
 
 // parseCoordinate 解析经纬度坐标
@@ -514,14 +880,18 @@ func (s *TCPServer) handleSOSAlert(data *ParsedDeviceData) {
 
 	if s.influxSvc != nil {
 		s.influxSvc.WriteTelemetry(&services.TelemetryData{
-			IMEI:       data.IMEI,
-			EventType:  alertType,
-			Latitude:   data.Latitude,
-			Longitude:  data.Longitude,
-			HeartRate:  data.HeartRate,
-			Battery:    data.Battery,
-			SOSFlag:    true,
-			RawPayload: data.RawPayload,
+			IMEI:          data.IMEI,
+			EventType:     alertType,
+			Latitude:      data.Latitude,
+			Longitude:     data.Longitude,
+			HeartRate:     data.HeartRate,
+			Battery:       data.Battery,
+			BloodPressure: data.BloodPressure,
+			SpO2:          data.SpO2,
+			HRV:           data.HRV,
+			Steps:         data.Steps,
+			SOSFlag:       true,
+			RawPayload:    data.RawPayload,
 		})
 	}
 
@@ -563,14 +933,39 @@ func (s *TCPServer) writeToRedis(data *ParsedDeviceData) error {
 		status = "alert"
 	}
 
+	nowTs := time.Now().Unix()
 	fields := map[string]interface{}{
 		"status":     status,
-		"heart_rate": data.HeartRate,
 		"battery":    data.Battery,
-		"lat":        data.Latitude,
-		"lon":        data.Longitude,
-		"event_type": data.EventType,
-		"updated_at": time.Now().Unix(),
+		"updated_at": nowTs,
+	}
+	if data.Latitude != 0 && data.Longitude != 0 {
+		fields["lat"] = data.Latitude
+		fields["lon"] = data.Longitude
+	}
+	if data.EventType != "" && data.EventType != "LK" && data.EventType != "VER" && data.EventType != "HB" && data.EventType != "WIFI_DATA" {
+		fields["event_type"] = data.EventType
+	}
+
+	if data.HeartRate > 0 {
+		fields["heart_rate"] = data.HeartRate
+		fields["hr_updated_at"] = nowTs
+	}
+	if data.BloodPressure != "" {
+		fields["bp"] = data.BloodPressure
+		fields["bp_updated_at"] = nowTs
+	}
+	if data.SpO2 > 0 {
+		fields["spo2"] = data.SpO2
+		fields["spo2_updated_at"] = nowTs
+	}
+	if data.HRV > 0 {
+		fields["hrv"] = data.HRV
+		fields["hrv_updated_at"] = nowTs
+	}
+	if data.Steps > 0 {
+		fields["steps"] = data.Steps
+		fields["steps_updated_at"] = nowTs
 	}
 
 	if err := s.redisSvc.GetClient().HSet(ctx, key, fields).Err(); err != nil {
@@ -587,29 +982,50 @@ func (s *TCPServer) writeToInfluxDB(data *ParsedDeviceData) error {
 	}
 
 	return s.influxSvc.WriteTelemetry(&services.TelemetryData{
-		IMEI:       data.IMEI,
-		EventType:  data.EventType,
-		Latitude:   data.Latitude,
-		Longitude:  data.Longitude,
-		HeartRate:  data.HeartRate,
-		Battery:    data.Battery,
-		SOSFlag:    data.SOSFlag,
-		RawPayload: data.RawPayload,
+		IMEI:          data.IMEI,
+		EventType:     data.EventType,
+		Latitude:      data.Latitude,
+		Longitude:     data.Longitude,
+		HeartRate:     data.HeartRate,
+		Battery:       data.Battery,
+		BloodPressure: data.BloodPressure,
+		SpO2:          data.SpO2,
+		HRV:           data.HRV,
+		Steps:         data.Steps,
+		SOSFlag:       data.SOSFlag,
+		RawPayload:    data.RawPayload,
 	})
 }
 
-// writeToMySQL 写入 MySQL 事件记录
+// writeToMySQL 写入 MySQL 事件记录（保存包含位置信息与 SOS/告警的事件记录，用于历史轨迹追溯与告警工单统计）
 func (s *TCPServer) writeToMySQL(data *ParsedDeviceData) error {
+	// 若非告警事件且无有效坐标位置，则不写 MySQL 仅存入 InfluxDB 时序库
+	if !data.IsAlert() && data.Latitude == 0 && data.Longitude == 0 {
+		return nil
+	}
+
+	locType := "GPS"
+	if strings.Contains(strings.ToUpper(data.RawPayload), "WIFI") || data.EventType == "WIFI" {
+		locType = "WIFI"
+	} else if strings.Contains(strings.ToUpper(data.RawPayload), "LBS") || data.EventType == "LBS" {
+		locType = "LBS"
+	}
+
 	event := &models.DeviceEvent{
-		IMEI:       data.IMEI,
-		EventType:  data.EventType,
-		Latitude:   data.Latitude,
-		Longitude:  data.Longitude,
-		HeartRate:  data.HeartRate,
-		Battery:    data.Battery,
-		RawPayload: data.RawPayload,
-		EventTime:  data.Timestamp,
-		CreatedAt:  time.Now(),
+		IMEI:          data.IMEI,
+		EventType:     data.EventType,
+		LocationType:  locType,
+		Latitude:      data.Latitude,
+		Longitude:     data.Longitude,
+		HeartRate:     data.HeartRate,
+		Battery:       data.Battery,
+		BloodPressure: data.BloodPressure,
+		SpO2:          data.SpO2,
+		HRV:           data.HRV,
+		Steps:         data.Steps,
+		RawPayload:    data.RawPayload,
+		EventTime:     data.Timestamp,
+		CreatedAt:     time.Now(),
 	}
 	return s.mysqlSvc.SaveDeviceEvent(event)
 }
@@ -618,13 +1034,23 @@ func (s *TCPServer) writeToMySQL(data *ParsedDeviceData) error {
 func (s *TCPServer) Stop() error {
 	log.Printf("[INFO] 正在停止 TCP 服务器...")
 
-	close(s.quit)
+	s.stopOnce.Do(func() {
+		close(s.quit)
+	})
 
 	if s.listener != nil {
 		if err := s.listener.Close(); err != nil {
 			log.Printf("[WARN] 关闭监听器失败: %v", err)
 		}
 	}
+
+	// 强制关闭所有活动 TCP 会话以立即解绑协程
+	s.sessions.Range(func(key, value interface{}) bool {
+		if conn, ok := value.(net.Conn); ok {
+			conn.Close()
+		}
+		return true
+	})
 
 	done := make(chan struct{})
 	go func() {

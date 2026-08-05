@@ -1,19 +1,27 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, watch, nextTick, ref, computed } from 'vue';
-import AMapLoader from '@amap/amap-jsapi-loader';
+import { Plus, Minus, Crosshair, MapPin } from 'lucide-vue-next';
 
-// 高德地图安全密钥配置 (请替换为您自己的 Key)
+/*
+// ------------------------------------------------------------------
+// 原高德地图 (AMap) 逻辑（暂时注释保留）
+// ------------------------------------------------------------------
+import AMapLoader from '@amap/amap-jsapi-loader';
 const AMAP_KEY = '51f8039ddd81720e5acd9cf08f4da659';
 const AMAP_SECURITY_CODE = '1bc91108fb1a45315f635b3671d2ffca';
-
 (window as any)._AMapSecurityConfig = {
   securityJsCode: AMAP_SECURITY_CODE,
 };
+*/
+
+const GOOGLE_MAPS_KEY = 'AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw';
 
 const props = defineProps<{
   latitude?: number;
   longitude?: number;
   zoom?: number;
+  status?: string;
+  accuracy?: number;
 }>();
 
 const emit = defineEmits<{
@@ -24,7 +32,9 @@ const loading = ref(true);
 const loadError = ref(false);
 let map: any = null;
 let marker: any = null;
+let accuracyCircle: any = null;
 let geocoder: any = null;
+let googleObj: any = null;
 
 // 计算经纬度是否有效 (0 / NaN / 越界 都视为无效)
 const isValidCoord = (lat: any, lng: any) => {
@@ -36,40 +46,92 @@ const isValidCoord = (lat: any, lng: any) => {
 // 是否拥有有效坐标（控制 Marker 是否渲染）
 const hasValidPosition = computed(() => isValidCoord(props.latitude, props.longitude));
 
+// 谷歌地图异步单例加载方法
+const loadGoogleMaps = () => {
+  return new Promise<any>((resolve, reject) => {
+    if ((window as any).google && (window as any).google.maps) {
+      return resolve((window as any).google.maps);
+    }
+    const scriptId = 'google-maps-script';
+    if (document.getElementById(scriptId)) {
+      let interval = setInterval(() => {
+        if ((window as any).google && (window as any).google.maps) {
+          clearInterval(interval);
+          resolve((window as any).google.maps);
+        }
+      }, 100);
+      return;
+    }
+    const script = document.createElement('script');
+    script.id = scriptId;
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_KEY}&language=zh-CN`;
+    script.async = true;
+    script.defer = true;
+    script.onload = () => {
+      if ((window as any).google && (window as any).google.maps) {
+        resolve((window as any).google.maps);
+      } else {
+        reject(new Error('Google Maps script loaded but google.maps unavailable'));
+      }
+    };
+    script.onerror = (err) => reject(err);
+    document.head.appendChild(script);
+  });
+};
+
 // Marker 渲染器
-const renderMarker = (pos: [number, number]) => {
-  const AMap = (window as any).AMap;
-  if (!AMap || !map) return;
+const renderMarker = (pos: { lat: number; lng: number }) => {
+  if (!googleObj || !map) return;
   
-  // 清除旧的 marker
   if (marker) {
-    map.remove(marker);
+    marker.setMap(null);
     marker = null;
   }
+  if (accuracyCircle) {
+    accuracyCircle.setMap(null);
+    accuracyCircle = null;
+  }
+
+  const isSOS = props.status === 'sos_alert';
+  const isOffline = props.status === 'offline';
+
+  // 离线冷灰 / 告警警示红 / 在线翡翠绿
+  const iconColor = isSOS ? '#ef4444' : isOffline ? '#64748b' : '#10b981';
+  const strapColor = isSOS ? '#dc2626' : isOffline ? '#475569' : '#059669';
+  const iconBgFill = isSOS ? '#fee2e2' : isOffline ? '#f1f5f9' : '#ecfdf5';
+
+  const accuracyMeter = props.accuracy || 18.5;
+
+  // 绘制 1:1 地理物理半径定位误差范围圈
+  accuracyCircle = new googleObj.Circle({
+    map: map,
+    center: pos,
+    radius: accuracyMeter,
+    strokeColor: iconColor,
+    strokeOpacity: 0.8,
+    strokeWeight: 1.5,
+    fillColor: iconColor,
+    fillOpacity: 0.08,
+    clickable: false,
+  });
   
-  // 高德原生点标记
-  marker = new AMap.Marker({
+  marker = new googleObj.Marker({
     position: pos,
     map: map,
-    icon: new AMap.Icon({
-      size: new AMap.Size(30, 40),
-      image: 'data:image/svg+xml;base64,' + btoa(`
-        <svg xmlns="http://www.w3.org/2000/svg" width="30" height="40" viewBox="0 0 30 40">
-          <defs>
-            <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
-              <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#000" flood-opacity="0.3"/>
-            </filter>
-          </defs>
-          <path filter="url(#shadow)" d="M15 0 C6.7 0 0 6.7 0 15 c0 10.5 15 25 15 25 s15 -14.5 15 -25 C30 6.7 23.3 0 15 0z" fill="#3b82f6"/>
-          <circle cx="15" cy="15" r="6" fill="white"/>
+    title: '手环当前位置',
+    icon: {
+      url: 'data:image/svg+xml;base64,' + btoa(`
+        <svg xmlns="http://www.w3.org/2000/svg" width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="${iconColor}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 1h6v5H9z" fill="${strapColor}" stroke="${iconColor}" stroke-width="1.2"/>
+          <path d="M9 18h6v5H9z" fill="${strapColor}" stroke="${iconColor}" stroke-width="1.2"/>
+          <rect x="6" y="6" width="12" height="12" rx="3.5" fill="${iconBgFill}" stroke="${iconColor}" stroke-width="2"/>
+          <circle cx="12" cy="12" r="2" fill="none" stroke="${iconColor}" stroke-width="1.5" />
+          <path d="M18.5 10v4" stroke="${iconColor}" stroke-width="2" stroke-linecap="round" />
         </svg>
       `),
-      imageSize: new AMap.Size(30, 40),
-      imageOffset: new AMap.Pixel(0, 0)
-    }),
-    offset: new AMap.Pixel(-15, -40),
-    zIndex: 100,
-    title: '当前位置'
+      scaledSize: new googleObj.Size(34, 34),
+      anchor: new googleObj.Point(17, 17)
+    }
   });
 };
 
@@ -79,46 +141,33 @@ const initMap = async () => {
   loadError.value = false;
   
   try {
-    const AMap = await AMapLoader.load({
-      key: AMAP_KEY,
-      version: '2.0',
-      plugins: ['AMap.Geocoder', 'AMap.Marker', 'AMap.Icon', 'AMap.Size', 'AMap.Pixel', 'AMap.Circle'],
-    });
+    googleObj = await loadGoogleMaps();
 
-    // 地图初始中心：如果有有效坐标则用真实坐标，否则用空地图（无中心）
     const hasPos = isValidCoord(props.latitude, props.longitude);
-    const center: [number, number] | undefined = hasPos
-      ? [Number(props.longitude), Number(props.latitude)]
-      : undefined;
+    const center = hasPos
+      ? { lat: Number(props.latitude), lng: Number(props.longitude) }
+      : { lat: 30.658633, lng: 104.064718 };
 
-    console.log('[Amap] 初始化，是否有有效坐标:', hasPos, '中心:', center);
+    const mapEl = document.getElementById('amap-container');
+    if (!mapEl) return;
 
-    map = new AMap.Map('amap-container', {
-      viewMode: '2D',
+    map = new googleObj.Map(mapEl, {
       zoom: props.zoom || (hasPos ? 16 : 11),
       center: center,
-      dragEnable: true,
-      zoomEnable: true,
-      resizeEnable: true,
+      disableDefaultUI: true,
+      zoomControl: false,
     });
 
-    map.on('error', (err: any) => {
-      console.error('地图运行错误:', err);
-    });
+    geocoder = new googleObj.Geocoder();
 
-    geocoder = new AMap.Geocoder({ city: '全国' });
-
-    // 仅在有有效坐标时才渲染 Marker
     if (hasPos && center) {
       renderMarker(center);
       resolveAddress();
-    } else {
-      console.log('[Amap] 无有效坐标，不渲染 Marker');
     }
     
     loading.value = false;
   } catch (e) {
-    console.error('高德地图加载失败', e);
+    console.error('谷歌地图 (Google Maps) 加载失败', e);
     loading.value = false;
     loadError.value = true;
   }
@@ -131,9 +180,9 @@ const resolveAddress = () => {
   const lat = Number(props.latitude);
   const lng = Number(props.longitude);
   
-  geocoder.getAddress([lng, lat], (status: string, result: any) => {
-    if (status === 'complete' && result.regeocode) {
-      emit('address-resolved', result.regeocode.formattedAddress);
+  geocoder.geocode({ location: { lat, lng } }, (results: any, status: string) => {
+    if (status === 'OK' && results && results[0]) {
+      emit('address-resolved', results[0].formatted_address);
     }
   });
 };
@@ -142,11 +191,8 @@ watch(() => [props.latitude, props.longitude], ([newLat, newLng]) => {
   const hasPos = isValidCoord(newLat, newLng);
 
   if (map && hasPos) {
-    const pos: [number, number] = [Number(newLng), Number(newLat)];
-    console.log('[Amap] 更新位置:', pos);
-    
-    // 平滑移动中心
-    map.setCenter(pos, false, 500);
+    const pos = { lat: Number(newLat), lng: Number(newLng) };
+    map.panTo(pos);
     
     if (marker) {
       marker.setPosition(pos);
@@ -155,19 +201,75 @@ watch(() => [props.latitude, props.longitude], ([newLat, newLng]) => {
     }
     resolveAddress();
   } else if (map && marker) {
-    // 坐标失效，移除 Marker
-    map.remove(marker);
+    marker.setMap(null);
     marker = null;
   }
 }, { immediate: true });
+
+let userLocationMarker: any = null;
+
+const zoomIn = () => {
+  if (map) map.setZoom(map.getZoom() + 1);
+};
+
+const zoomOut = () => {
+  if (map) map.setZoom(map.getZoom() - 1);
+};
+
+const centerOnDevice = () => {
+  if (map && hasValidPosition.value) {
+    map.panTo({ lat: Number(props.latitude), lng: Number(props.longitude) });
+    map.setZoom(17);
+  }
+};
+
+const locateUserPosition = () => {
+  if (!navigator.geolocation) {
+    centerOnDevice();
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const uLat = pos.coords.latitude;
+      const uLng = pos.coords.longitude;
+      if (map && googleObj) {
+        map.panTo({ lat: uLat, lng: uLng });
+        map.setZoom(16);
+
+        if (userLocationMarker) userLocationMarker.setMap(null);
+        userLocationMarker = new googleObj.Marker({
+          position: { lat: uLat, lng: uLng },
+          map: map,
+          title: '我的当前位置',
+          icon: {
+            path: googleObj.SymbolPath.CIRCLE,
+            scale: 8,
+            fillColor: '#3b82f6',
+            fillOpacity: 1,
+            strokeColor: '#ffffff',
+            strokeWeight: 2,
+          }
+        });
+      }
+    },
+    (err) => {
+      console.warn('获取我的当前定位失败:', err);
+      centerOnDevice();
+    },
+    { enableHighAccuracy: true, timeout: 5000 }
+  );
+};
 
 onMounted(() => {
   initMap();
 });
 
 onUnmounted(() => {
+  if (userLocationMarker) {
+    userLocationMarker.setMap(null);
+    userLocationMarker = null;
+  }
   if (map) {
-    map.destroy();
     map = null;
     marker = null;
   }
@@ -178,14 +280,46 @@ onUnmounted(() => {
   <div class="relative w-full h-full bg-slate-100">
     <div id="amap-container" class="w-full h-full"></div>
     
+    <!-- H5 统一竖向地图控件组（避开底部与放大缩小冲突） -->
+    <div class="absolute bottom-20 right-4 flex flex-col bg-white border border-slate-200/90 rounded-2xl shadow-xl z-20 overflow-hidden text-slate-700 font-sans">
+      <button 
+        @click="zoomIn"
+        class="w-10 h-10 flex items-center justify-center border-b border-slate-100 hover:bg-slate-50 text-slate-700 active:bg-slate-100 transition"
+        title="放大"
+      >
+        <Plus :size="18" />
+      </button>
+      <button 
+        @click="zoomOut"
+        class="w-10 h-10 flex items-center justify-center border-b border-slate-100 hover:bg-slate-50 text-slate-700 active:bg-slate-100 transition"
+        title="缩小"
+      >
+        <Minus :size="18" />
+      </button>
+      <button 
+        @click="locateUserPosition"
+        class="w-10 h-10 flex items-center justify-center border-b border-slate-100 hover:bg-slate-50 text-blue-600 active:bg-blue-50 transition"
+        title="我的当前位置"
+      >
+        <Crosshair :size="18" />
+      </button>
+      <button 
+        @click="centerOnDevice"
+        class="w-10 h-10 flex items-center justify-center hover:bg-slate-50 text-emerald-600 active:bg-emerald-50 transition"
+        title="聚焦设备位置"
+      >
+        <MapPin :size="18" />
+      </button>
+    </div>
+
     <div v-if="loading" class="absolute inset-0 z-10 flex flex-col items-center justify-center bg-white/80 backdrop-blur-sm">
       <div class="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-3"></div>
-      <span class="text-xs text-slate-500">正在加载地图...</span>
+      <span class="text-xs text-slate-500">正在加载谷歌地图 (Google Maps)...</span>
     </div>
 
     <div v-if="loadError" class="absolute inset-0 z-20 bg-white flex flex-col items-center justify-center p-4">
-      <span class="text-red-500 font-bold mb-2">地图加载失败</span>
-      <span class="text-[10px] text-slate-400 text-center max-w-[200px] mb-3">请检查高德 Key 是否正确</span>
+      <span class="text-red-500 font-bold mb-2">谷歌地图 (Google Maps) 加载失败</span>
+      <span class="text-[10px] text-slate-400 text-center max-w-[200px] mb-3">请检查谷歌 API Key 是否有效</span>
       <button @click="initMap" class="text-xs bg-blue-500 text-white px-4 py-1.5 rounded-lg">重试</button>
     </div>
   </div>

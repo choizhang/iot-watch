@@ -5,6 +5,7 @@ import {
   ChevronLeft, 
   ShieldAlert, 
   Plus, 
+  Minus,
   Trash2, 
   MapPin, 
   Check, 
@@ -14,17 +15,23 @@ import {
   Edit3,
   AlertTriangle
 } from 'lucide-vue-next'
-import AMapLoader from '@amap/amap-jsapi-loader'
 import { useDeviceStore, type GeofenceData } from '../store/device'
 
+/*
+// ------------------------------------------------------------------
+// 原高德地图 (AMap) 逻辑（暂时注释保留）
+// ------------------------------------------------------------------
+import AMapLoader from '@amap/amap-jsapi-loader'
 const AMAP_KEY = '51f8039ddd81720e5acd9cf08f4da659'
 const AMAP_SECURITY_CODE = '1bc91108fb1a45315f635b3671d2ffca'
-
 if (typeof window !== 'undefined') {
   ;(window as any)._AMapSecurityConfig = {
     securityJsCode: AMAP_SECURITY_CODE,
   }
 }
+*/
+
+const GOOGLE_MAPS_KEY = 'AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw'
 
 const router = useRouter()
 const store = useDeviceStore()
@@ -37,18 +44,84 @@ const toastMsg = ref('')
 // 编辑模式下的表单状态
 const editId = ref<number | null>(null)
 const formName = ref('社区防走失安全圈')
-const formLat = ref(22.371234)
-const formLng = ref(114.115678)
+const formLat = ref(30.658633)
+const formLng = ref(104.064718)
 const formRadius = ref(500)
 const formType = ref<'IN' | 'OUT'>('IN')
 const currentAddress = ref('正在解析地图中心位置...')
 
 let mapInstance: any = null
-let AMapObj: any = null
+let googleObj: any = null
 let geocoder: any = null
 let circleOverlays: any[] = []
 let previewCircle: any = null
 let deviceMarker: any = null
+
+const zoomIn = () => {
+  if (mapInstance) mapInstance.setZoom(mapInstance.getZoom() + 1)
+}
+
+const zoomOut = () => {
+  if (mapInstance) mapInstance.setZoom(mapInstance.getZoom() - 1)
+}
+
+const loadGoogleMaps = (): Promise<any> => {
+  if ((window as any).google && (window as any).google.maps) {
+    return Promise.resolve((window as any).google.maps)
+  }
+  return new Promise((resolve, reject) => {
+    const scriptId = 'google-maps-geofence-sdk'
+    if (document.getElementById(scriptId)) {
+      const timer = setInterval(() => {
+        if ((window as any).google && (window as any).google.maps) {
+          clearInterval(timer);
+          resolve((window as any).google.maps);
+        }
+      }, 100);
+      return;
+    }
+    const script = document.createElement('script')
+    script.id = scriptId
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_KEY}&language=zh-CN`
+    script.async = true
+    script.defer = true
+    script.onload = () => resolve((window as any).google.maps)
+    script.onerror = reject
+    document.head.appendChild(script)
+  })
+}
+
+function createCustomOverlay(googleMaps: any, pos: { lat: number; lng: number }, element: HTMLElement) {
+  class CustomOverlay extends googleMaps.OverlayView {
+    position: any
+    element: HTMLElement
+    constructor(p: { lat: number; lng: number }, el: HTMLElement) {
+      super()
+      this.position = new googleMaps.LatLng(p.lat, p.lng)
+      this.element = el
+    }
+    onAdd() {
+      const panes = this.getPanes()
+      panes?.overlayMouseTarget.appendChild(this.element)
+    }
+    draw() {
+      const overlayProjection = this.getProjection()
+      if (!overlayProjection) return
+      const point = overlayProjection.fromLatLngToDivPixel(this.position)
+      if (point) {
+        this.element.style.left = point.x - 14 + 'px'
+        this.element.style.top = point.y - 14 + 'px'
+        this.element.style.position = 'absolute'
+      }
+    }
+    onRemove() {
+      if (this.element.parentNode) {
+        this.element.parentNode.removeChild(this.element)
+      }
+    }
+  }
+  return new CustomOverlay(pos, element)
+}
 
 onMounted(async () => {
   await store.fetchStatus()
@@ -58,7 +131,6 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (mapInstance) {
-    mapInstance.destroy()
     mapInstance = null
   }
 })
@@ -73,26 +145,23 @@ const showToast = (msg: string) => {
 const initMap = async () => {
   loadingMap.value = true
   try {
-    AMapObj = await AMapLoader.load({
-      key: AMAP_KEY,
-      version: '2.0',
-      plugins: ['AMap.Circle', 'AMap.Marker', 'AMap.Pixel', 'AMap.Geocoder']
-    })
+    googleObj = await loadGoogleMaps()
 
     if (!mapContainer.value) return
 
-    geocoder = new AMapObj.Geocoder({ city: '香港特别行政区' })
+    geocoder = new googleObj.Geocoder()
 
-    const lat = store.status?.last_latitude || 22.371234
-    const lng = store.status?.last_longitude || 114.115678
+    const lat = store.status?.last_latitude || 30.658633
+    const lng = store.status?.last_longitude || 104.064718
 
     formLat.value = lat
     formLng.value = lng
 
-    mapInstance = new AMapObj.Map(mapContainer.value, {
-      viewMode: '2D',
+    mapInstance = new googleObj.Map(mapContainer.value, {
       zoom: 15,
-      center: [lng, lat]
+      center: { lat, lng },
+      disableDefaultUI: true,
+      zoomControl: false,
     })
 
     // 长者当前位置 Marker
@@ -104,17 +173,12 @@ const initMap = async () => {
         📍
       </div>
     `
-    deviceMarker = new AMapObj.Marker({
-      position: [lng, lat],
-      content: markerDom,
-      offset: new AMapObj.Pixel(-14, -14),
-      zIndex: 100
-    })
+    deviceMarker = createCustomOverlay(googleObj, { lat, lng }, markerDom)
     deviceMarker.setMap(mapInstance)
 
     // 监听地图拖拽移动，实时更新中心点坐标与地址
-    mapInstance.on('mapmove', onMapMove)
-    mapInstance.on('moveend', onMapMoveEnd)
+    mapInstance.addListener('drag', onMapMove)
+    mapInstance.addListener('idle', onMapMoveEnd)
 
     loadingMap.value = false
     renderAllGeofences()
@@ -128,8 +192,8 @@ const initMap = async () => {
 const onMapMove = () => {
   if (!isEditMode.value || !mapInstance) return
   const center = mapInstance.getCenter()
-  formLat.value = center.getLat()
-  formLng.value = center.getLng()
+  formLat.value = center.lat()
+  formLng.value = center.lng()
   updatePreviewCircle()
 }
 
@@ -137,16 +201,12 @@ const onMapMove = () => {
 const onMapMoveEnd = () => {
   if (!isEditMode.value || !mapInstance || !geocoder) return
   const center = mapInstance.getCenter()
-  formLat.value = center.getLat()
-  formLng.value = center.getLng()
+  formLat.value = center.lat()
+  formLng.value = center.lng()
 
-  geocoder.getAddress([formLng.value, formLat.value], (status: string, result: any) => {
-    if (status === 'complete' && result.regeocode) {
-      currentAddress.value = result.regeocode.formattedAddress || '已知选点位置'
-      if (formName.value === '社区防走失安全圈' || formName.value.endsWith('防护圈')) {
-        const shortAddr = result.regeocode.addressComponent.district + (result.regeocode.addressComponent.township || '')
-        formName.value = `${shortAddr || '中心点'}防护圈`
-      }
+  geocoder.geocode({ location: { lat: formLat.value, lng: formLng.value } }, (results: any, status: string) => {
+    if (status === 'OK' && results && results[0]) {
+      currentAddress.value = results[0].formatted_address || '已知选点位置'
     } else {
       currentAddress.value = `${formLat.value.toFixed(4)}, ${formLng.value.toFixed(4)}`
     }
@@ -155,38 +215,58 @@ const onMapMoveEnd = () => {
 
 // 渲染列表中所有启用围栏
 const renderAllGeofences = () => {
-  if (!mapInstance || !AMapObj) return
+  if (!mapInstance || !googleObj) return
 
   circleOverlays.forEach(c => c.setMap(null))
   circleOverlays = []
 
   if (isEditMode.value) return // 编辑模式下只渲染预览圆
 
-  store.geofences.forEach(fence => {
+  const fenceList = store.geofences || []
+  fenceList.forEach(fence => {
     if (!fence.enabled) return
     const isOut = fence.fence_type === 'OUT'
-    const circle = new AMapObj.Circle({
-      center: [fence.longitude, fence.latitude],
+    const circle = new googleObj.Circle({
+      map: mapInstance,
+      center: { lat: fence.latitude, lng: fence.longitude },
       radius: fence.radius,
       strokeColor: isOut ? '#ef4444' : '#0284c7',
       strokeOpacity: 0.8,
       strokeWeight: 2,
       fillColor: isOut ? '#ef4444' : '#0284c7',
       fillOpacity: 0.2,
-      strokeStyle: 'dashed'
     })
-    circle.setMap(mapInstance)
     circleOverlays.push(circle)
   })
 
-  if (circleOverlays.length > 0 && deviceMarker) {
-    mapInstance.setFitView([...circleOverlays, deviceMarker])
+  if (circleOverlays.length > 0) {
+    const bounds = new googleObj.LatLngBounds()
+    circleOverlays.forEach(circle => {
+      if (circle && typeof circle.getBounds === 'function') {
+        const b = circle.getBounds()
+        if (b && !b.isEmpty()) bounds.union(b)
+      }
+    })
+    if (!bounds.isEmpty()) {
+      mapInstance.fitBounds(bounds)
+      const listener = googleObj.event.addListenerOnce(mapInstance, 'bounds_changed', () => {
+        if (mapInstance.getZoom() > 15) {
+          mapInstance.setZoom(15)
+        }
+      })
+      setTimeout(() => {
+        googleObj.event.removeListener(listener)
+        if (mapInstance && mapInstance.getZoom() > 15) {
+          mapInstance.setZoom(15)
+        }
+      }, 300)
+    }
   }
 }
 
 // 编辑模式下预览实时安全圆
 const updatePreviewCircle = () => {
-  if (!mapInstance || !AMapObj || !isEditMode.value) return
+  if (!mapInstance || !googleObj || !isEditMode.value) return
 
   if (previewCircle) {
     previewCircle.setMap(null)
@@ -194,8 +274,9 @@ const updatePreviewCircle = () => {
   }
 
   const isOut = formType.value === 'OUT'
-  previewCircle = new AMapObj.Circle({
-    center: [formLng.value, formLat.value],
+  previewCircle = new googleObj.Circle({
+    map: mapInstance,
+    center: { lat: formLat.value, lng: formLng.value },
     radius: formRadius.value,
     strokeColor: isOut ? '#ef4444' : '#10b981',
     strokeOpacity: 0.9,
@@ -229,7 +310,8 @@ const enterEditMode = (fence?: GeofenceData) => {
   }
 
   if (mapInstance) {
-    mapInstance.setZoomAndCenter(15, [formLng.value, formLat.value], false, 200)
+    mapInstance.setZoom(15)
+    mapInstance.panTo({ lat: formLat.value, lng: formLng.value })
   }
   updatePreviewCircle()
   onMapMoveEnd()
@@ -266,7 +348,8 @@ const centerToDevice = () => {
   const lat = store.status?.last_latitude || 22.371234
   const lng = store.status?.last_longitude || 114.115678
   if (mapInstance) {
-    mapInstance.setZoomAndCenter(15, [lng, lat], false, 300)
+    mapInstance.setZoom(15)
+    mapInstance.panTo({ lat, lng })
   }
 }
 
@@ -316,7 +399,7 @@ watch(() => [formRadius.value, formType.value], () => {
 
       <!-- 地图加载 Mask -->
       <div v-if="loadingMap" class="absolute inset-0 bg-white/80 flex items-center justify-center z-20">
-        <div class="text-xs text-slate-500 animate-pulse font-bold">正在加载电子围栏高德地图...</div>
+        <div class="text-xs text-slate-500 animate-pulse font-bold">正在加载电子围栏地图...</div>
       </div>
 
       <!-- 编辑模式：屏幕固定准心图标 📍 Pin -->
@@ -332,14 +415,30 @@ watch(() => [formRadius.value, formType.value], () => {
         <span>👈 拖动地图调整圈心，准心即为中心点 👉</span>
       </div>
 
-      <!-- 快捷归位按钮 -->
-      <button 
-        @click="centerToDevice" 
-        class="absolute bottom-4 right-4 z-20 w-10 h-10 bg-white shadow-xl rounded-2xl flex items-center justify-center text-slate-700 active:scale-90 transition border border-slate-100"
-        title="定位长者位置"
-      >
-        <LocateFixed :size="20" class="text-emerald-600" />
-      </button>
+      <!-- H5 统一竖向地图控件组 (统一 Icon，避开重叠) -->
+      <div class="absolute bottom-6 right-4 flex flex-col bg-white border border-slate-200/90 rounded-2xl shadow-xl z-20 overflow-hidden text-slate-700 font-sans">
+        <button 
+          @click="zoomIn"
+          class="w-10 h-10 flex items-center justify-center border-b border-slate-100 hover:bg-slate-50 text-slate-700 active:bg-slate-100 transition"
+          title="放大"
+        >
+          <Plus :size="18" />
+        </button>
+        <button 
+          @click="zoomOut"
+          class="w-10 h-10 flex items-center justify-center border-b border-slate-100 hover:bg-slate-50 text-slate-700 active:bg-slate-100 transition"
+          title="缩小"
+        >
+          <Minus :size="18" />
+        </button>
+        <button 
+          @click="centerToDevice" 
+          class="w-10 h-10 flex items-center justify-center hover:bg-slate-50 text-emerald-600 active:bg-emerald-50 transition"
+          title="聚焦长者位置"
+        >
+          <LocateFixed :size="18" />
+        </button>
+      </div>
     </div>
 
     <!-- ===== 模式 A: 围栏列表看板视角 (非编辑模式) ===== -->
@@ -347,13 +446,13 @@ watch(() => [formRadius.value, formType.value], () => {
       <div class="flex items-center justify-between">
         <h2 class="font-bold text-slate-800 text-sm flex items-center space-x-1.5">
           <Layers :size="16" class="text-emerald-500" />
-          <span>已生效围栏列表 ({{ store.geofences.length }})</span>
+          <span>已生效围栏列表 ({{ (store.geofences || []).length }})</span>
         </h2>
         <span class="text-[11px] text-slate-400">滑动开关实时启用</span>
       </div>
 
       <!-- 空状态提示 -->
-      <div v-if="store.geofences.length === 0" class="bg-white rounded-3xl p-8 text-center border border-slate-100 shadow-sm">
+      <div v-if="!store.geofences || store.geofences.length === 0" class="bg-white rounded-3xl p-8 text-center border border-slate-100 shadow-sm">
         <ShieldAlert :size="48" class="mx-auto text-slate-300 mb-3" />
         <p class="text-sm font-bold text-slate-700">暂未设置电子围栏</p>
         <p class="text-xs text-slate-400 mt-1 mb-4">设置防走失圈，长者离开范围自动警报</p>
@@ -397,7 +496,7 @@ watch(() => [formRadius.value, formType.value], () => {
           <div class="flex items-center justify-between text-xs text-slate-600 pt-1">
             <div class="flex items-center space-x-2 font-mono">
               <span class="bg-slate-100 px-2 py-1 rounded-lg font-bold text-slate-700">保护半径: {{ fence.radius }}m</span>
-              <span class="text-slate-400">坐标: {{ fence.latitude.toFixed(3) }}, {{ fence.longitude.toFixed(3) }}</span>
+              <span class="text-slate-400 font-sans">防护中心: 社区安全防护圈</span>
             </div>
 
             <div class="flex items-center space-x-1">

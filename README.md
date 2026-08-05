@@ -129,6 +129,7 @@ iot/
 ├── start.sh                  # 一键启动脚本
 ├── stop.sh                   # 一键停止与日志清理脚本
 ├── TESTING.md                # 全场景自动化测试指南
+├── DEPLOYMENT.md             # 生产部署与 Docker vs K8s 选型运维指南
 └── README.md                 # 项目主说明文档
 ```
 
