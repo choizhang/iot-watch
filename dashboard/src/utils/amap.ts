@@ -11,10 +11,24 @@ if (typeof window !== 'undefined') {
 }
 */
 
-// 谷歌地图 (Google Maps JS API) 配置密钥
-export const GOOGLE_MAPS_KEY = 'AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw'
-
 let googleMapsPromise: Promise<any> | null = null
+
+// Fetch Google Maps Key from backend config API
+export const fetchGoogleMapsKey = async (): Promise<string> => {
+  try {
+    const API_URL = (import.meta as any).env?.VITE_API_BASE_URL || '/api/v1'
+    const resp = await fetch(`${API_URL}/device/config/maps-key`)
+    if (resp.ok) {
+      const data = await resp.json()
+      if (data.maps_key) {
+        return data.maps_key
+      }
+    }
+  } catch (e) {
+    console.error('Failed to fetch maps key:', e)
+  }
+  return ''
+}
 
 // 单例 Google Maps API 预加载与缓存
 export const getGoogleMapsInstance = (): Promise<any> => {
@@ -24,7 +38,7 @@ export const getGoogleMapsInstance = (): Promise<any> => {
   }
   if (googleMapsPromise) return googleMapsPromise
 
-  googleMapsPromise = new Promise((resolve, reject) => {
+  googleMapsPromise = new Promise(async (resolve, reject) => {
     const scriptId = 'google-maps-js-sdk'
     if (document.getElementById(scriptId)) {
       const checkInterval = setInterval(() => {
@@ -36,9 +50,16 @@ export const getGoogleMapsInstance = (): Promise<any> => {
       return
     }
 
+    const key = await fetchGoogleMapsKey()
+    if (!key) {
+      reject(new Error('无法获取谷歌地图 API 密钥'))
+      googleMapsPromise = null
+      return
+    }
+
     const script = document.createElement('script')
     script.id = scriptId
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_KEY}&libraries=places,visualization&language=zh-CN`
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${key}&libraries=places,visualization&language=zh-CN`
     script.async = true
     script.defer = true
     script.onload = () => {

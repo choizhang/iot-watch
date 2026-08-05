@@ -197,6 +197,7 @@ func registerRoutes(router *gin.Engine, deviceHandler *handlers.DeviceHandler) {
 			device.GET("/:imei/trajectory", deviceHandler.HandleGetDeviceTrajectory)
 			device.GET("/:imei/vitals/history", deviceHandler.HandleGetDeviceVitalsHistory)
 			device.GET("/:imei/heatmap", deviceHandler.HandleGetDeviceHeatmap)
+			device.GET("/config/maps-key", deviceHandler.HandleGetMapsKey)
 		}
 	}
 }

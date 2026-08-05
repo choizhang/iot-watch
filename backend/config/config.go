@@ -11,12 +11,13 @@ import (
 
 // Config 全局配置结构体
 type Config struct {
-	Port        string
-	Host        string
-	MySQL       MySQLConfig
-	Redis       RedisConfig
-	InfluxDB    InfluxDBConfig
-	EMQX        EMQXConfig
+	Port          string
+	Host          string
+	GoogleMapsKey string
+	MySQL         MySQLConfig
+	Redis         RedisConfig
+	InfluxDB      InfluxDBConfig
+	EMQX          EMQXConfig
 }
 
 // MySQLConfig MySQL 数据库配置
@@ -89,6 +90,7 @@ func InitConfig() error {
 		EMQX: EMQXConfig{
 			WebhookPath: getEnv("EMQX_WEBHOOK_PATH", "/api/v1/device/raw-tcp"),
 		},
+		GoogleMapsKey: getEnv("GOOGLE_MAPS_KEY", ""),
 	}
 
 	log.Printf("[INFO] 配置加载完成，服务将在 %s:%s 启动", GlobalConfig.Host, GlobalConfig.Port)

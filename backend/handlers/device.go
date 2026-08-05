@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"elder-guard-iot/config"
 	"elder-guard-iot/models"
 	"elder-guard-iot/services"
 	"fmt"
@@ -102,7 +103,7 @@ func (h *DeviceHandler) HandleRawTCP(c *gin.Context) {
 	})
 }
 
-const GOOGLE_GEOCATE_KEY = "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"
+
 
 type GoogleGeocodeResponse struct {
 	Results []struct {
@@ -116,7 +117,7 @@ func fetchAddressFromGoogleGeocoding(lat, lon float64) string {
 	if lat == 0 && lon == 0 {
 		return "定位中..."
 	}
-	url := fmt.Sprintf("https://maps.googleapis.com/maps/api/geocode/json?latlng=%.6f,%.6f&language=zh-CN&key=%s", lat, lon, GOOGLE_GEOCATE_KEY)
+	url := fmt.Sprintf("https://maps.googleapis.com/maps/api/geocode/json?latlng=%.6f,%.6f&language=zh-CN&key=%s", lat, lon, config.GlobalConfig.GoogleMapsKey)
 	client := http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(url)
 	if err == nil && resp != nil && resp.StatusCode == 200 {
@@ -175,7 +176,7 @@ func ResolveLocationFromWiFiAndLBS(bssidList []string, cell *CellTowerInfo) (lat
 		return 0, 0, 0, "", fmt.Errorf("无有效 Wi-Fi 或 LBS 信息")
 	}
 
-	url := fmt.Sprintf("https://www.googleapis.com/geolocation/v1/geolocate?key=%s", GOOGLE_GEOCATE_KEY)
+	url := fmt.Sprintf("https://www.googleapis.com/geolocation/v1/geolocate?key=%s", config.GlobalConfig.GoogleMapsKey)
 	jsonBytes, _ := json.Marshal(reqBody)
 	client := http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
@@ -1295,6 +1296,14 @@ func (h *DeviceHandler) HandleToggleGeofence(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, fence)
+}
+
+// HandleGetMapsKey 获取谷歌地图前端秘钥
+// 接口地址：GET /api/v1/device/config/maps-key
+func (h *DeviceHandler) HandleGetMapsKey(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"maps_key": config.GlobalConfig.GoogleMapsKey,
+	})
 }
 
 
